@@ -17,10 +17,11 @@ from enum import Enum, auto
 from typing import Dict, Set, Optional, Callable, Any
 import struct
 import time
+import os
 from dataclasses import dataclass, field
 
 from crypto_utils import (
-    generate_key, generate_session_id, derive_keys, hash_data,
+    generate_key, generate_session_id, derive_keys, derive_directional_keys, hash_data,
     create_challenge, create_response, verify_response,
     SecureMessage, CryptoError, get_timestamp
 )
@@ -263,7 +264,7 @@ class ClientProtocol(ProtocolFSM):
         if self.state != ProtocolState.INIT:
             raise StateTransitionError(f"Cannot send CLIENT_HELLO in state {self.state.name}")
         
-        self.client_random = generate_key()  # 32 random bytes
+        self.client_random = os.urandom(32)  # 32 random bytes
         self.session_id = generate_session_id()
         
         # Payload: client_random + session_id + protocol_version
@@ -306,16 +307,24 @@ class ClientProtocol(ProtocolFSM):
         
         self.transition_to(ProtocolState.CHALLENGE_RECEIVED)
         
-        # Derive session keys using client_random + server_random + PSK
-        master_secret = hash_data(
-            self.client_random + self.server_random + self.pre_shared_key
-        )
-        salt = hash_data(self.session_id)
-        self.encryption_key, self.mac_key = derive_keys(master_secret, salt)
+        # Derive directional keys from master key Ki
+        # Each client Ci shares a master key Ki with the server
+        c2s_enc, c2s_mac, s2c_enc, s2c_mac = derive_directional_keys(self.pre_shared_key)
         
-        # Create secure message handler
+        # Client sends with C2S keys (Client → Server)
+        self.encryption_key = c2s_enc  # C2S_Enc_0 = H(Ki || "C2S-ENC")
+        self.mac_key = c2s_mac          # C2S_Mac_0 = H(Ki || "C2S-MAC")
+        
+        # Store S2C keys for receiving (Server → Client)
+        self.s2c_encryption_key = s2c_enc  # S2C_Enc_0 = H(Ki || "S2C-ENC")
+        self.s2c_mac_key = s2c_mac          # S2C_Mac_0 = H(Ki || "S2C-MAC")
+        
+        # Derive client_id from session_id (use first byte as client ID)
+        self.client_id = self.session_id[0]  # Single byte (0-255)
+        
+        # Create secure message handler for sending (client uses C2S keys)
         self.secure_message = SecureMessage(
-            self.encryption_key, self.mac_key, self.session_id
+            self.encryption_key, self.mac_key, self.client_id, direction=0
         )
         
         # Create challenge response using pre-shared key
@@ -359,11 +368,18 @@ class ClientProtocol(ProtocolFSM):
         status = message.payload[0]
         server_key_confirmation = message.payload[1:33]
         
-        # Verify server's key confirmation
-        expected_confirmation = hash_data(self.mac_key + self.encryption_key)  # Reversed order from client
+        # Verify server's key confirmation using S2C keys (server sends with S2C keys)
+        # Server confirmation: hash(s2c_mac + s2c_enc)
+        expected_confirmation = hash_data(self.s2c_mac_key + self.s2c_encryption_key)
         if server_key_confirmation != expected_confirmation:
             self.set_error("Server key confirmation mismatch")
             return False
+        
+        # Create receiver for S2C messages (server→client)
+        # Receiver direction should match the incoming message direction (S2C = direction 1)
+        self.secure_message_receiver = SecureMessage(
+            self.s2c_encryption_key, self.s2c_mac_key, self.client_id, direction=1
+        )
         
         if status == 0x01:  # Success
             self.transition_to(ProtocolState.ESTABLISHED)
@@ -387,7 +403,8 @@ class ClientProtocol(ProtocolFSM):
         if not self.is_established():
             raise StateTransitionError(f"Cannot receive data in state {self.state.name}")
         
-        payload, msg_type, seq_num = self.secure_message.parse_message(encrypted_data)
+        # Use S2C receiver for messages from server
+        payload, opcode, round_num = self.secure_message_receiver.parse_message(encrypted_data)
         return payload
     
     def create_close(self) -> ProtocolMessage:
@@ -443,7 +460,7 @@ class ServerProtocol(ProtocolFSM):
         protocol_version = struct.unpack('>H', message.payload[48:50])[0]
         
         # Generate server random and challenge
-        self.server_random = generate_key()
+        self.server_random = os.urandom(32)  # 32 random bytes
         self.challenge = create_challenge()
         
         self.transition_to(ProtocolState.HELLO_RECEIVED)
@@ -486,15 +503,29 @@ class ServerProtocol(ProtocolFSM):
                 sequence_number=self.sequence_number
             )
         
-        # Derive session keys
-        master_secret = hash_data(
-            self.client_random + self.server_random + self.pre_shared_key
-        )
-        salt = hash_data(self.session_id)
-        self.encryption_key, self.mac_key = derive_keys(master_secret, salt)
+        # Derive directional keys from master key Ki
+        # Each client Ci shares a master key Ki with the server
+        c2s_enc, c2s_mac, s2c_enc, s2c_mac = derive_directional_keys(self.pre_shared_key)
         
-        # Verify client's key confirmation
-        expected_confirmation = hash_data(self.encryption_key + self.mac_key)
+        # Server receives with C2S keys (Client → Server)
+        self.c2s_encryption_key = c2s_enc  # C2S_Enc_0 = H(Ki || "C2S-ENC")
+        self.c2s_mac_key = c2s_mac          # C2S_Mac_0 = H(Ki || "C2S-MAC")
+        
+        # Derive client_id from session_id (use first byte as client ID)
+        self.client_id = self.session_id[0]  # Single byte (0-255)
+        
+        # Create receiver for C2S messages (client→server)
+        # Receiver direction should match the incoming message direction (C2S = direction 0)
+        self.secure_message_receiver = SecureMessage(
+            self.c2s_encryption_key, self.c2s_mac_key, self.client_id, direction=0
+        )
+        
+        # Server sends with S2C keys (Server → Client)
+        self.encryption_key = s2c_enc  # S2C_Enc_0 = H(Ki || "S2C-ENC")
+        self.mac_key = s2c_mac          # S2C_Mac_0 = H(Ki || "S2C-MAC")
+        
+        # Verify client's key confirmation (client derived C2S keys)
+        expected_confirmation = hash_data(c2s_enc + c2s_mac)
         if client_key_confirmation != expected_confirmation:
             self.set_error("Key confirmation mismatch")
             self.sequence_number += 1
@@ -504,9 +535,9 @@ class ServerProtocol(ProtocolFSM):
                 sequence_number=self.sequence_number
             )
         
-        # Create secure message handler
+        # Create secure message handler for sending (server uses S2C keys)
         self.secure_message = SecureMessage(
-            self.encryption_key, self.mac_key, self.session_id
+            self.encryption_key, self.mac_key, self.client_id, direction=1
         )
         
         self.transition_to(ProtocolState.ESTABLISHED)
@@ -538,7 +569,8 @@ class ServerProtocol(ProtocolFSM):
         if not self.is_established():
             raise StateTransitionError(f"Cannot receive data in state {self.state.name}")
         
-        payload, msg_type, seq_num = self.secure_message.parse_message(encrypted_data)
+        # Use C2S receiver for messages from client
+        payload, msg_type, seq_num = self.secure_message_receiver.parse_message(encrypted_data)
         return payload
     
     def process_close(self, message: ProtocolMessage) -> ProtocolMessage:
@@ -551,67 +583,6 @@ class ServerProtocol(ProtocolFSM):
             payload=b"Connection terminated",
             sequence_number=self.sequence_number
         )
-
-
-def print_state_diagram():
-    """Print the protocol state diagram with opcodes"""
-    print("""
-    Secure Communication Protocol State Diagram (with Opcodes)
-    ==========================================================
-    
-    CLIENT                                       SERVER
-    ======                                       ======
-    
-    [INIT]                                       [INIT]
-       |                                            |
-       | ---- CLIENT_HELLO (10) --------------->   |
-       v                                            v
-    [HELLO_SENT]                            [HELLO_RECEIVED]
-       |                                            |
-       |                                            v
-       |                                     [CHALLENGE_SENT]
-       |                                            |
-       | <--- SERVER_CHALLENGE (20) ------------   |
-       v                                            |
-    [CHALLENGE_RECEIVED]                            |
-       |                                            |
-       | ---- CLIENT_DATA (30) ---------------->   |
-       v                                            |
-    [DATA_SENT]                                     |
-       |                                            |
-       | <--- SERVER_AGGR_RESPONSE (40) --------   |
-       v                                            v
-    [ESTABLISHED]                            [ESTABLISHED]
-       |                                            |
-       v                                            v
-    [DATA_TRANSFER]                          [DATA_TRANSFER]
-       |                                            |
-       | <==== Encrypted Data Exchange ========>   |
-       |                                            |
-       | ---- TERMINATE (60) ------------------>   |
-       v                                            v
-    [CLOSING]                                 [CLOSING]
-       |                                            |
-       | <--- TERMINATE (60) -------------------   |
-       v                                            v
-    [CLOSED]                                  [CLOSED]
-    
-    ERROR HANDLING:
-    ---------------
-    At any point, if key synchronization fails:
-    - KEY_DESYNC_ERROR (50) is sent
-    - Connection transitions to ERROR state
-    
-    OPCODES:
-    --------
-    10 - CLIENT_HELLO: Initial client greeting with random bytes
-    20 - SERVER_CHALLENGE: Server response with challenge
-    30 - CLIENT_DATA: Client's challenge response + key confirmation
-    40 - SERVER_AGGR_RESPONSE: Server's authentication result
-    50 - KEY_DESYNC_ERROR: Key synchronization failure
-    60 - TERMINATE: Connection termination request
-    """)
-
 
 if __name__ == "__main__":
     print("=== Protocol FSM Test ===\n")
@@ -673,6 +644,3 @@ if __name__ == "__main__":
     print(f"\nFinal states:")
     print(f"   Client: {client.get_state().name}")
     print(f"   Server: {server.get_state().name}")
-    
-    print("\n" + "="*50)
-    print_state_diagram()

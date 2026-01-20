@@ -66,8 +66,8 @@ class SecureClient:
         if pre_shared_key is None:
             raise ValueError("Pre-shared key is required")
         
-        if len(pre_shared_key) != 32:
-            raise ValueError("Pre-shared key must be 32 bytes")
+        if len(pre_shared_key) != 16:
+            raise ValueError("Pre-shared key must be 16 bytes (128-bit)")
         
         self.host = host
         self.port = port
@@ -345,13 +345,19 @@ class InteractiveClient:
                 if response:
                     print(f"Server: {response}")
                 else:
-                    print("No response from server")
+                    print("⚠️  Attack detected or connection closed!")
+                    break
                     
             except KeyboardInterrupt:
                 print("\nInterrupted")
                 break
+            except CryptoError as e:
+                print(f"⚠️  Security Error: {e}")
+                print("Connection terminated due to attack detection.")
+                break
             except Exception as e:
                 print(f"Error: {e}")
+                break
         
         self.client.disconnect()
     
@@ -396,8 +402,8 @@ def main():
     # Parse pre-shared key
     try:
         pre_shared_key = bytes.fromhex(args.key)
-        if len(pre_shared_key) != 32:
-            print("Error: Pre-shared key must be 32 bytes (64 hex characters)")
+        if len(pre_shared_key) != 16:
+            print("Error: Pre-shared key must be 16 bytes (32 hex characters)")
             return
     except ValueError:
         print("Error: Invalid hex string for pre-shared key")

@@ -420,8 +420,8 @@ def main():
     if args.key:
         try:
             pre_shared_key = bytes.fromhex(args.key)
-            if len(pre_shared_key) != 32:
-                print("Error: Pre-shared key must be 32 bytes (64 hex characters)")
+            if len(pre_shared_key) != 16:
+                print("Error: Pre-shared key must be 16 bytes (32 hex characters)")
                 return
         except ValueError:
             print("Error: Invalid hex string for pre-shared key")
