@@ -21,9 +21,7 @@ import socket
 import struct
 import logging
 import threading
-import time
-from typing import Optional, Callable, Any
-from datetime import datetime
+from typing import Optional
 
 from crypto_utils import (
     generate_key, CryptoError, SecureMessage
@@ -54,7 +52,7 @@ class SecureClient:
     """
     
     def __init__(self, host: str = 'localhost', port: int = 9999,
-                 pre_shared_key: bytes = None):
+                 pre_shared_key: bytes = None, client_id: int = 1):
         """
         Initialize the secure client.
         
@@ -62,6 +60,7 @@ class SecureClient:
             host: Server host address
             port: Server port
             pre_shared_key: Pre-shared secret key (must match server's key)
+            client_id: Client identifier (1-5)
         """
         if pre_shared_key is None:
             raise ValueError("Pre-shared key is required")
@@ -69,9 +68,13 @@ class SecureClient:
         if len(pre_shared_key) != 16:
             raise ValueError("Pre-shared key must be 16 bytes (128-bit)")
         
+        if client_id < 1 or client_id > 5:
+            raise ValueError("Client ID must be between 1 and 5")
+        
         self.host = host
         self.port = port
         self.pre_shared_key = pre_shared_key
+        self.client_id = client_id
         self.socket: Optional[socket.socket] = None
         self.protocol: Optional[ClientProtocol] = None
         self.connected = False
@@ -91,8 +94,8 @@ class SecureClient:
             self.socket.connect((self.host, self.port))
             logger.info(f"Connected to {self.host}:{self.port}")
             
-            # Initialize protocol
-            self.protocol = ClientProtocol(self.pre_shared_key)
+            # Initialize protocol with client_id
+            self.protocol = ClientProtocol(self.pre_shared_key, client_id=self.client_id)
             
             # Perform handshake
             if self._perform_handshake():
@@ -394,6 +397,8 @@ def main():
     parser.add_argument('--host', default='localhost', help='Server host')
     parser.add_argument('--port', type=int, default=9999, help='Server port')
     parser.add_argument('--key', required=True, help='Pre-shared key (hex string)')
+    parser.add_argument('--id', type=int, required=True, choices=[1,2,3,4,5],
+                        help='Client ID (1-5)')
     parser.add_argument('--message', '-m', help='Send single message and exit')
     parser.add_argument('--interactive', '-i', action='store_true',
                         help='Run in interactive mode')
@@ -413,7 +418,8 @@ def main():
     client = SecureClient(
         host=args.host,
         port=args.port,
-        pre_shared_key=pre_shared_key
+        pre_shared_key=pre_shared_key,
+        client_id=args.id
     )
     
     try:

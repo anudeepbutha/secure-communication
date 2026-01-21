@@ -11,9 +11,7 @@ import socket
 import threading
 import struct
 import logging
-import json
-import os
-from typing import Dict, Optional, Callable, Any
+from typing import Dict, Optional, Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -57,22 +55,31 @@ class SecureServer:
     - Message integrity via HMAC
     """
     
-    def __init__(self, host: str = 'localhost', port: int = 9999,
-                 pre_shared_key: Optional[bytes] = None):
+    def __init__(self, host: str = 'localhost', port: int = 9999):
         """
         Initialize the secure server.
         
         Args:
             host: Server host address
             port: Server port
-            pre_shared_key: Pre-shared secret key (will generate if not provided)
         """
         self.host = host
         self.port = port
-        self.pre_shared_key = pre_shared_key or generate_key()
+        
+        # Hardcoded pre-shared keys for 5 clients (Client IDs 1-5)
+        # In production, these would be securely distributed to clients
+        self.client_keys = {
+            1: bytes.fromhex('c19b4d0dbb2550550314f0551d829e14'),  # Client 1
+            2: bytes.fromhex('fc1288ba000ab08d9bda2cd6eabd15ef'),  # Client 2
+            3: bytes.fromhex('a3cc6de5b4d6b6798029f1bb5bbd1e10'),  # Client 3
+            4: bytes.fromhex('d91baeccd0d6f5f423c8a4f81cf584a5'),  # Client 4
+            5: bytes.fromhex('1b127762951e5537a14d7a164c166aa0'),  # Client 5
+        }
+        
         self.socket: Optional[socket.socket] = None
         self.running = False
-        self.sessions: Dict[bytes, ClientSession] = {}
+        self.sessions: Dict[bytes, ClientSession] = {}  # session_id -> ClientSession
+        self.client_sessions: Dict[int, ClientSession] = {}  # client_id -> ClientSession
         self.message_handlers: Dict[MessageType, Callable] = {}
         self.data_handler: Optional[Callable[[bytes, ClientSession], bytes]] = None
         self._lock = threading.Lock()
@@ -108,8 +115,8 @@ class SecureServer:
         self.running = True
         
         logger.info(f"Server started on {self.host}:{self.port}")
-        logger.info(f"Pre-shared key: {self.pre_shared_key.hex()}")
-        
+        logger.info("Pre-shared keys for clients:")
+
         while self.running:
             try:
                 self.socket.settimeout(1.0)
@@ -202,8 +209,8 @@ class SecureServer:
     
     def _handle_client(self, client_socket: socket.socket, client_address: tuple):
         """Handle a client connection"""
-        protocol = ServerProtocol(self.pre_shared_key)
         session: Optional[ClientSession] = None
+        client_id: Optional[int] = None
         
         try:
             # Phase 1: Receive CLIENT_HELLO (opcode 10)
@@ -212,7 +219,24 @@ class SecureServer:
                 logger.error(f"Expected CLIENT_HELLO (opcode 10), got {hello_msg.msg_type if hello_msg else 'None'}")
                 return
             
-            logger.info(f"[{client_address}] Received CLIENT_HELLO (opcode {MessageType.CLIENT_HELLO.value})")
+            # Extract client_id from CLIENT_HELLO payload
+            # Payload format: client_random (32) + session_id (16) + protocol_version (2) + client_id (1)
+            if len(hello_msg.payload) < 51:
+                logger.error(f"[{client_address}] CLIENT_HELLO payload too short")
+                return
+            
+            client_id = hello_msg.payload[50]  # Client ID is at byte 50
+            
+            # Validate client_id
+            if client_id not in self.client_keys:
+                logger.error(f"[{client_address}] Invalid client_id {client_id} (must be 1-5)")
+                return
+            
+            logger.info(f"[{client_address}] Received CLIENT_HELLO (opcode {MessageType.CLIENT_HELLO.value}) from Client {client_id}")
+            
+            # Initialize protocol with the client's pre-shared key
+            pre_shared_key = self.client_keys[client_id]
+            protocol = ServerProtocol(pre_shared_key, client_id=client_id)
             
             # Send SERVER_CHALLENGE (opcode 20)
             server_challenge = protocol.process_client_hello(hello_msg)
@@ -258,6 +282,9 @@ class SecureServer:
             
             with self._lock:
                 self.sessions[protocol.session_id] = session
+                self.client_sessions[client_id] = session
+            
+            logger.info(f"[{client_address}] Session established for Client {client_id}")
             
             # Phase 4: Data transfer
             self._data_transfer_phase(client_socket, session)
@@ -285,8 +312,10 @@ class SecureServer:
             if session and session.session_id in self.sessions:
                 with self._lock:
                     del self.sessions[session.session_id]
+                    if client_id and client_id in self.client_sessions:
+                        del self.client_sessions[client_id]
             client_socket.close()
-            logger.info(f"[{client_address}] Connection closed")
+            logger.info(f"[{client_address}] Connection closed" + (f" (Client {client_id})" if client_id else ""))
     
     def _data_transfer_phase(self, sock: socket.socket, session: ClientSession):
         """Handle data transfer phase with attack detection"""
@@ -410,28 +439,14 @@ def main():
     parser = argparse.ArgumentParser(description='Secure Communication Server')
     parser.add_argument('--host', default='localhost', help='Host address')
     parser.add_argument('--port', type=int, default=9999, help='Port number')
-    parser.add_argument('--key', help='Pre-shared key (hex string)')
     parser.add_argument('--mode', choices=['echo', 'command'], default='echo',
                         help='Server mode: echo or command')
     args = parser.parse_args()
     
-    # Parse pre-shared key if provided
-    pre_shared_key = None
-    if args.key:
-        try:
-            pre_shared_key = bytes.fromhex(args.key)
-            if len(pre_shared_key) != 16:
-                print("Error: Pre-shared key must be 16 bytes (32 hex characters)")
-                return
-        except ValueError:
-            print("Error: Invalid hex string for pre-shared key")
-            return
-    
-    # Create server
+    # Create server with hardcoded keys for 5 clients
     server = SecureServer(
         host=args.host,
-        port=args.port,
-        pre_shared_key=pre_shared_key
+        port=args.port
     )
     
     # Set handler based on mode
@@ -442,10 +457,6 @@ def main():
         server.set_data_handler(create_command_handler())
         print("Server running in COMMAND mode")
         print("Available commands: TIME, SESSION, COUNT, PING, ECHO <message>")
-    
-    print(f"\nPre-shared key (save this for clients):")
-    print(f"  {server.pre_shared_key.hex()}")
-    print()
     
     try:
         server.start()

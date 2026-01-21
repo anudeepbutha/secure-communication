@@ -1,6 +1,6 @@
 """
 Interactive Man-in-the-Middle Attacker
-Acts as a proxy between client and server, intercepting and modifying messages.
+Acts as a proxy between multiple clients and server, intercepting and modifying messages.
 
 Supported Attacks:
 1. Incorrect HMAC - Tampers with message content
@@ -9,31 +9,22 @@ Supported Attacks:
 4. Key desynchronization - Modifies messages to cause key desync
 
 Usage:
-    1. Start real server: python server.py --port 9999 --key <hex_key>
-    2. Start attacker: python attacks.py --attack 1 --client-port 8888 --server-port 9999
-    3. Connect client to attacker's port: python client.py --port 8888 --key <hex_key> -i
-    4. Send messages - attacker will intercept and modify them
+    1. Start real server: python server.py --port 9999
+    2. Start attacker: python attacks.py --client-port 8888 --server-port 9999
+    3. Connect clients to attacker's port: python client.py --id 1 --key <key> --port 8888 -i
+    4. Attacker shows connected clients and prompts for which client to attack
 """
 
 import socket
 import struct
-import time
 import threading
 import logging
-import os
-import sys
 import argparse
-from typing import Optional, Tuple, Dict
+import time
+from typing import Optional, Dict
 from collections import deque
-
-from crypto_utils import (
-    generate_key, CryptoError, SecureMessage,
-    NonceManager, derive_directional_keys
-)
-from protocol_fsm import (
-    ClientProtocol, ServerProtocol, ProtocolMessage, MessageType,
-    ProtocolState
-)
+from dataclasses import dataclass
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(
@@ -43,10 +34,24 @@ logging.basicConfig(
 logger = logging.getLogger('MITMAttacker')
 
 
+@dataclass
+class ClientConnection:
+    """Represents a connected client through the attacker proxy"""
+    client_id: int
+    client_socket: socket.socket
+    server_socket: socket.socket
+    client_address: tuple
+    connected_at: datetime
+    message_count: int = 0
+    active: bool = True
+    handshake_complete: bool = False  # Track if handshake is done
+
+
 class MITMAttacker:
     """
     Man-in-the-Middle Attacker Proxy
-    Sits between client and server, intercepting and modifying messages.
+    Sits between multiple clients and server, intercepting and modifying messages.
+    Supports targeting specific clients for attacks.
     """
     
     ATTACK_TYPES = {
@@ -56,7 +61,7 @@ class MITMAttacker:
         '4': 'Key desynchronization'
     }
     
-    def __init__(self, client_port: int, server_host: str, server_port: int, attack_type: str):
+    def __init__(self, client_port: int, server_host: str, server_port: int):
         """
         Initialize MITM attacker.
         
@@ -64,77 +69,387 @@ class MITMAttacker:
             client_port: Port to listen for client connections
             server_host: Real server host
             server_port: Real server port
-            attack_type: Type of attack to perform (1-4)
         """
         self.client_port = client_port
         self.server_host = server_host
         self.server_port = server_port
-        self.attack_type = attack_type
-        self.attack_name = self.ATTACK_TYPES.get(attack_type, "Unknown")
         self.running = False
         
-        # Storage for captured messages
-        self.captured_messages: deque = deque(maxlen=10)
-        self.message_count = 0
-        self.attack_performed = False
+        # Track connected clients
+        self.clients: Dict[int, ClientConnection] = {}  # client_id -> ClientConnection
+        self.clients_lock = threading.Lock()
+        
+        # Attack configuration (set via interactive prompt)
+        self.target_client_id: Optional[int] = None
+        self.attack_type: Optional[str] = None
+        self.attack_name: Optional[str] = None
+        self.attack_performed: Dict[int, bool] = {}  # Track if attack performed per client
+        
+        # Storage for captured messages per client
+        self.captured_messages: Dict[int, deque] = {}  # client_id -> deque of messages
         
         logger.info(f"MITM Attacker initialized")
-        logger.info(f"Attack type: {self.attack_name}")
         logger.info(f"Listening on port {client_port}, forwarding to {server_host}:{server_port}")
     
     def start(self):
-        """Start the MITM proxy"""
+        """Start the MITM proxy and interactive console"""
         self.running = True
+        
+        # Check if server is reachable
+        print("\n" + "="*70)
+        print(f"  MITM ATTACKER STARTUP")
+        print("="*70)
+        print(f"Checking if server is reachable at {self.server_host}:{self.server_port}...")
+        
+        try:
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_sock.settimeout(2)
+            test_sock.connect((self.server_host, self.server_port))
+            test_sock.close()
+            print(f"✓ Server is reachable at {self.server_host}:{self.server_port}")
+        except (ConnectionRefusedError, socket.timeout, OSError) as e:
+            print(f"\n❌ ERROR: Cannot connect to server at {self.server_host}:{self.server_port}")
+            print(f"   Please start the server first:")
+            print(f"   python server.py --port {self.server_port} --mode command")
+            print(f"\n   Error details: {e}\n")
+            return
+        
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(('localhost', self.client_port))
-        listener.listen(1)
+        listener.listen(5)
         
         print("\n" + "="*70)
-        print(f"  MITM ATTACKER ACTIVE - Attack Type: {self.attack_name}")
+        print(f"  MITM ATTACKER ACTIVE")
         print("="*70)
-        print(f"Listening for client on port {self.client_port}...")
+        print(f"Listening for clients on port {self.client_port}...")
         print(f"Will forward to server at {self.server_host}:{self.server_port}")
-        print("Waiting for client connection...\n")
+        print("\nWaiting for client connections...")
+        print("Once clients connect, you'll be prompted to select attack target.\n")
+        
+        # Start interactive console in separate thread
+        console_thread = threading.Thread(target=self._interactive_console, daemon=True)
+        console_thread.start()
         
         try:
-            client_socket, client_addr = listener.accept()
-            logger.info(f"Client connected from {client_addr}")
-            print(f"✓ Client connected from {client_addr}")
-            
-            # Connect to real server
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.connect((self.server_host, self.server_port))
-            logger.info(f"Connected to real server at {self.server_host}:{self.server_port}")
-            print(f"✓ Connected to server at {self.server_host}:{self.server_port}\n")
-            
-            # Start forwarding threads
-            client_to_server = threading.Thread(
-                target=self._forward_client_to_server,
-                args=(client_socket, server_socket),
-                daemon=True
-            )
-            server_to_client = threading.Thread(
-                target=self._forward_server_to_client,
-                args=(server_socket, client_socket),
-                daemon=True
-            )
-            
-            client_to_server.start()
-            server_to_client.start()
-            
-            # Wait for threads to complete
-            client_to_server.join()
-            server_to_client.join()
+            while self.running:
+                try:
+                    listener.settimeout(1.0)
+                    client_sock, client_addr = listener.accept()
+                    logger.info(f"Client connected from {client_addr}")
+                    
+                    # Handle client in separate thread
+                    client_thread = threading.Thread(
+                        target=self._handle_client,
+                        args=(client_sock, client_addr),
+                        daemon=True
+                    )
+                    client_thread.start()
+                    
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    if self.running:
+                        logger.error(f"Error accepting connection: {e}")
             
         except KeyboardInterrupt:
-            print("\n\nAttacker interrupted by user")
+            print("\n\nShutting down attacker...")
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Fatal error: {e}")
         finally:
             listener.close()
-            self.running = False
-            print("\nMITM Attacker stopped")
+            self._cleanup_all_clients()
+    
+    def _interactive_console(self):
+        """Interactive console for selecting attack target and type"""
+        time.sleep(1)  # Give time for initial setup
+        
+        while self.running:
+            try:
+                print("\n" + "="*70)
+                print("  ATTACK CONSOLE")
+                print("="*70)
+                
+                # Show connected clients
+                with self.clients_lock:
+                    if not self.clients:
+                        print("No clients connected yet. Waiting...")
+                        time.sleep(2)
+                        continue
+                    
+                    print("\nConnected Clients:")
+                    for client_id, conn in self.clients.items():
+                        status = "ACTIVE" if conn.active else "DISCONNECTED"
+                        print(f"  Client {client_id}: {conn.client_address} - {status} ({conn.message_count} messages)")
+                
+                print("\n" + "-"*70)
+                print("Select attack target:")
+                client_input = input("Enter Client ID to attack (or 'q' to quit, 'r' to refresh): ").strip()
+                
+                if client_input.lower() == 'q':
+                    self.running = False
+                    break
+                elif client_input.lower() == 'r':
+                    continue
+                
+                try:
+                    target_id = int(client_input)
+                    with self.clients_lock:
+                        if target_id not in self.clients:
+                            print(f"❌ Client {target_id} not connected!")
+                            time.sleep(1)
+                            continue
+                        
+                        if not self.clients[target_id].active:
+                            print(f"❌ Client {target_id} is already disconnected!")
+                            time.sleep(1)
+                            continue
+                    
+                    # Select attack type
+                    print("\nAvailable attacks:")
+                    for key, name in self.ATTACK_TYPES.items():
+                        print(f"  {key}. {name}")
+                    
+                    attack_input = input("\nSelect attack type (1-4): ").strip()
+                    if attack_input not in self.ATTACK_TYPES:
+                        print("❌ Invalid attack type!")
+                        time.sleep(1)
+                        continue
+                    
+                    # Set attack target
+                    self.target_client_id = target_id
+                    self.attack_type = attack_input
+                    self.attack_name = self.ATTACK_TYPES[attack_input]
+                    self.attack_performed[target_id] = False
+                    
+                    print(f"\n✓ Attack configured:")
+                    print(f"  Target: Client {target_id}")
+                    print(f"  Attack: {self.attack_name}")
+                    print(f"\nWaiting for Client {target_id} to send a message...")
+                    
+                    # Wait for attack to complete
+                    while not self.attack_performed.get(target_id, False) and self.running:
+                        time.sleep(0.5)
+                    
+                    if self.attack_performed.get(target_id, False):
+                        print(f"\n✓ Attack executed on Client {target_id}!")
+                        print(f"  Client {target_id} connection terminated.")
+                    
+                    # Reset for next attack
+                    self.target_client_id = None
+                    self.attack_type = None
+                    self.attack_name = None
+                    time.sleep(2)
+                    
+                except ValueError:
+                    print("❌ Invalid input! Please enter a number.")
+                    time.sleep(1)
+                    
+            except Exception as e:
+                logger.error(f"Console error: {e}")
+                time.sleep(1)
+    
+    def _handle_client(self, client_sock: socket.socket, client_addr: tuple):
+        """Handle a single client connection"""
+        client_id = None
+        server_sock = None
+        
+        try:
+            # Connect to real server
+            server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                server_sock.connect((self.server_host, self.server_port))
+                logger.info(f"[{client_addr}] Connected to real server")
+            except ConnectionRefusedError:
+                print(f"\n❌ ERROR: Cannot connect to server at {self.server_host}:{self.server_port}")
+                print(f"   Make sure the server is running:")
+                print(f"   python server.py --port {self.server_port} --mode command\n")
+                logger.error(f"[{client_addr}] Server not running at {self.server_host}:{self.server_port}")
+                return
+            
+            # Intercept CLIENT_HELLO to extract client_id
+            hello_msg = self._recv_message(client_sock)
+            if not hello_msg or len(hello_msg) < 55:
+                logger.error(f"[{client_addr}] Invalid CLIENT_HELLO")
+                return
+            
+            # Extract client_id from CLIENT_HELLO payload (byte 50 of payload, after 4-byte length prefix)
+            # Message structure: [length(4)][opcode(1)][seq(4)][timestamp(4)][payload_len(4)][payload]
+            # Payload: client_random(32) + session_id(16) + version(2) + client_id(1)
+            try:
+                # Parse the protocol message structure
+                payload_start = 17  # 1 + 4 + 4 + 4 + 4
+                if len(hello_msg) >= payload_start + 51:
+                    client_id = hello_msg[payload_start + 50]  # client_id at position 50 in payload
+                else:
+                    logger.error(f"[{client_addr}] CLIENT_HELLO too short")
+                    return
+            except Exception as e:
+                logger.error(f"[{client_addr}] Error extracting client_id: {e}")
+                return
+            
+            logger.info(f"[{client_addr}] Client ID: {client_id}")
+            
+            # Forward CLIENT_HELLO to server
+            self._send_message(server_sock, hello_msg)
+            
+            # Register client
+            conn = ClientConnection(
+                client_id=client_id,
+                client_socket=client_sock,
+                server_socket=server_sock,
+                client_address=client_addr,
+                connected_at=datetime.now()
+            )
+            
+            with self.clients_lock:
+                self.clients[client_id] = conn
+                self.captured_messages[client_id] = deque(maxlen=10)
+            
+            print(f"\n✓ Client {client_id} connected from {client_addr}")
+            
+            # Start bidirectional forwarding
+            c2s_thread = threading.Thread(
+                target=self._forward_client_to_server,
+                args=(client_id,),
+                daemon=True
+            )
+            s2c_thread = threading.Thread(
+                target=self._forward_server_to_client,
+                args=(client_id,),
+                daemon=True
+            )
+            
+            c2s_thread.start()
+            s2c_thread.start()
+            
+            c2s_thread.join()
+            s2c_thread.join()
+            
+        except Exception as e:
+            logger.error(f"[{client_addr}] Error handling client: {e}")
+        finally:
+            if client_id:
+                with self.clients_lock:
+                    if client_id in self.clients:
+                        self.clients[client_id].active = False
+                print(f"\n✗ Client {client_id} disconnected")
+            
+            # Close both sockets to ensure client detects disconnection
+            if client_sock:
+                try:
+                    client_sock.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
+                try:
+                    client_sock.close()
+                except:
+                    pass
+            if server_sock:
+                try:
+                    server_sock.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
+                try:
+                    server_sock.close()
+                except:
+                    pass
+    
+    def _forward_client_to_server(self, client_id: int):
+        """Forward messages from client to server with potential attacks"""
+        with self.clients_lock:
+            if client_id not in self.clients:
+                return
+            conn = self.clients[client_id]
+        
+        handshake_messages = 0  # Track handshake messages (CLIENT_HELLO, CLIENT_DATA)
+        
+        while self.running and conn.active:
+            try:
+                # Receive from client
+                message = self._recv_message(conn.client_socket)
+                if not message:
+                    break
+                
+                conn.message_count += 1
+                
+                # Track handshake completion (CLIENT_HELLO at msg 1, CLIENT_DATA at msg 2)
+                handshake_messages += 1
+                if handshake_messages >= 2:
+                    conn.handshake_complete = True
+                
+                # Check if this is the target and we're past handshake
+                should_attack = (
+                    self.target_client_id == client_id and
+                    self.attack_type is not None and
+                    not self.attack_performed.get(client_id, False) and
+                    conn.handshake_complete  # Only attack after handshake
+                )
+                
+                if should_attack:
+                    print(f"\n[Attacker] Intercepting message from Client {client_id} (message #{conn.message_count})")
+                    
+                    # Special handling for reorder attack with multiple messages
+                    if self.attack_type == '3':  # Reorder attack
+                        result = self._attack_reorder_with_send(message, client_id, conn.server_socket)
+                        if result == "ATTACK_PERFORMED":
+                            self.attack_performed[client_id] = True
+                            print(f"\n⚠️  Attack performed on Client {client_id}. Terminating connection...")
+                            conn.active = False
+                            break
+                        elif result == "CONTINUE":
+                            continue  # Message already sent or held, continue loop
+                    else:
+                        # Perform attack normally
+                        original_message = message
+                        message = self._perform_attack(message, client_id, "C→S")
+                        
+                        # Send the (possibly modified) message
+                        self._send_message(conn.server_socket, message)
+                        
+                        # Check if attack was actually performed (not just captured)
+                        attack_actually_performed = (message != original_message) or (
+                            self.attack_type in ['1', '4']  # HMAC and Key desync always perform immediately
+                        )
+                        
+                        if attack_actually_performed:
+                            self.attack_performed[client_id] = True
+                            # Terminate this client after attack
+                            print(f"\n⚠️  Attack performed on Client {client_id}. Terminating connection...")
+                            conn.active = False
+                            break
+                        else:
+                            # For replay/reorder, we captured but didn't attack yet
+                            print(f"  ℹ Message captured. Waiting for next message to perform attack...")
+                            continue
+                else:
+                    # Forward normally
+                    self._send_message(conn.server_socket, message)
+                    
+            except Exception as e:
+                logger.error(f"[Client {client_id}] Forward C→S error: {e}")
+                break
+    
+    def _forward_server_to_client(self, client_id: int):
+        """Forward messages from server to client"""
+        with self.clients_lock:
+            if client_id not in self.clients:
+                return
+            conn = self.clients[client_id]
+        
+        while self.running and conn.active:
+            try:
+                # Receive from server
+                message = self._recv_message(conn.server_socket)
+                if not message:
+                    break
+                
+                # Forward to client
+                self._send_message(conn.client_socket, message)
+                
+            except Exception as e:
+                logger.error(f"[Client {client_id}] Forward S→C error: {e}")
+                break
     
     def _recv_message(self, sock: socket.socket) -> Optional[bytes]:
         """Receive a length-prefixed message"""
@@ -151,9 +466,9 @@ class MITMAttacker:
             if not data:
                 return None
             
-            return length_data + data  # Return with length prefix
+            # Return with length prefix
+            return length_data + data
         except Exception as e:
-            logger.debug(f"Error receiving message: {e}")
             return None
     
     def _recv_exact(self, sock: socket.socket, n: int) -> Optional[bytes]:
@@ -170,122 +485,29 @@ class MITMAttacker:
         """Send a message (already has length prefix)"""
         sock.sendall(message)
     
-    def _forward_client_to_server(self, client_sock: socket.socket, server_sock: socket.socket):
-        """Forward messages from client to server with potential attacks"""
-        print("="*70)
-        print("FORWARDING: Client → Server (with attack capability)")
-        print("="*70 + "\n")
-        
-        while self.running:
-            try:
-                message = self._recv_message(client_sock)
-                if not message:
-                    logger.info("Client disconnected")
-                    break
-                
-                self.message_count += 1
-                length = struct.unpack('>I', message[:4])[0]
-                data = message[4:]
-                
-                logger.info(f"[C→S] Message #{self.message_count}: {length} bytes")
-                
-                # Check if this is an encrypted data message (after handshake)
-                if self._is_encrypted_data_message(data) and not self.attack_performed:
-                    print("\n" + "🎯"*35)
-                    print(f"ENCRYPTED DATA MESSAGE INTERCEPTED! (Message #{self.message_count})")
-                    print("🎯"*35)
-                    
-                    # Perform attack
-                    modified_message = self._perform_attack(message, "C→S")
-                    
-                    if modified_message != message:
-                        self.attack_performed = True
-                        print(f"\n⚠️  ATTACK EXECUTED: {self.attack_name}")
-                        print("⚠️  Modified message sent to server")
-                        print("⚠️  Server should detect tampering and terminate connection\n")
-                        self._send_message(server_sock, modified_message)
-                    else:
-                        self._send_message(server_sock, message)
-                else:
-                    # Forward handshake messages normally
-                    self._send_message(server_sock, message)
-                    logger.debug(f"[C→S] Forwarded normally")
-                
-            except Exception as e:
-                logger.error(f"Error in client→server forwarding: {e}")
-                break
-        
-        self._cleanup_sockets(client_sock, server_sock)
-    
-    def _forward_server_to_client(self, server_sock: socket.socket, client_sock: socket.socket):
-        """Forward messages from server to client with potential attacks"""
-        print("="*70)
-        print("FORWARDING: Server → Client (with attack capability)")
-        print("="*70 + "\n")
-        
-        while self.running:
-            try:
-                message = self._recv_message(server_sock)
-                if not message:
-                    logger.info("Server disconnected")
-                    break
-                
-                length = struct.unpack('>I', message[:4])[0]
-                data = message[4:]
-                
-                logger.info(f"[S→C] Response: {length} bytes")
-                
-                # Check if this is an encrypted data message
-                if self._is_encrypted_data_message(data) and not self.attack_performed:
-                    print("\n" + "🎯"*35)
-                    print(f"ENCRYPTED RESPONSE INTERCEPTED!")
-                    print("🎯"*35)
-                    
-                    # Perform attack on server responses too
-                    modified_message = self._perform_attack(message, "S→C")
-                    
-                    if modified_message != message:
-                        self.attack_performed = True
-                        print(f"\n⚠️  ATTACK EXECUTED: {self.attack_name}")
-                        print("⚠️  Modified message sent to client")
-                        print("⚠️  Client should detect tampering and terminate connection\n")
-                        self._send_message(client_sock, modified_message)
-                    else:
-                        self._send_message(client_sock, message)
-                else:
-                    # Forward normally
-                    self._send_message(client_sock, message)
-                    logger.debug(f"[S→C] Forwarded normally")
-                
-            except Exception as e:
-                logger.error(f"Error in server→client forwarding: {e}")
-                break
-        
-        self._cleanup_sockets(server_sock, client_sock)
-    
     def _is_encrypted_data_message(self, data: bytes) -> bool:
         """Check if this looks like an encrypted data message (not handshake)"""
-        # Encrypted data messages are longer and don't start with handshake opcodes
-        if len(data) < 55:  # Minimum: header(23) + one block(16) + hmac(32) = 71
+        if len(data) < 55:
             return False
         
-        # Check if it's a protocol message (handshake)
+        # Check if it's a protocol message (handshake) by parsing opcode
         try:
-            opcode = struct.unpack('>B', data[0:1])[0]
-            # Handshake opcodes: 10, 20, 30, 40, 50, 60
-            if opcode in [10, 20, 30, 40, 50, 60]:
+            # Skip length prefix (4 bytes), get opcode
+            opcode = data[4]
+            # Handshake opcodes are 10, 20, 30, 40
+            if opcode in [10, 20, 30, 40]:
                 return False
-            # If opcode is unusual, it might be encrypted data
             return True
         except:
             return True
     
-    def _perform_attack(self, message: bytes, direction: str) -> bytes:
+    def _perform_attack(self, message: bytes, client_id: int, direction: str) -> bytes:
         """
         Perform the selected attack on the message.
         
         Args:
             message: Original message with length prefix
+            client_id: Target client ID
             direction: "C→S" or "S→C"
         
         Returns:
@@ -295,26 +517,26 @@ class MITMAttacker:
         data = message[4:]
         
         print(f"\n{'='*70}")
-        print(f"PERFORMING ATTACK: {self.attack_name}")
+        print(f"⚡ PERFORMING ATTACK: {self.attack_name}")
+        print(f"Target: Client {client_id}")
         print(f"Direction: {direction}")
         print(f"Message size: {len(data)} bytes")
         print(f"{'='*70}")
         
-        if self.attack_type == '1':  # Incorrect HMAC
+        if self.attack_type == '1':
             modified = self._attack_incorrect_hmac(data)
-        elif self.attack_type == '2':  # Replay attack
-            modified = self._attack_replay(data, direction)
-        elif self.attack_type == '3':  # Message reordering
-            modified = self._attack_reorder(data, direction)
-        elif self.attack_type == '4':  # Key desynchronization
+        elif self.attack_type == '2':
+            modified = self._attack_replay(data, client_id, direction)
+        elif self.attack_type == '3':
+            modified = self._attack_reorder(data, client_id, direction)
+        elif self.attack_type == '4':
             modified = self._attack_key_desync(data)
         else:
             modified = data
         
         if modified != data:
-            # Update length prefix if size changed
-            new_length = struct.pack('>I', len(modified))
-            return new_length + modified
+            print(f"✓ Message modified for attack")
+            return length_prefix + modified
         
         return message
     
@@ -323,7 +545,7 @@ class MITMAttacker:
         print("Attack strategy: Tamper with ciphertext to cause HMAC failure")
         
         if len(data) < 55:
-            print("  Message too short to tamper")
+            print("  ⚠ Message too short to attack")
             return data
         
         # Flip a bit in the ciphertext portion (after header, before HMAC)
@@ -337,48 +559,81 @@ class MITMAttacker:
         
         return bytes(modified)
     
-    def _attack_replay(self, data: bytes, direction: str) -> bytes:
+    def _attack_replay(self, data: bytes, client_id: int, direction: str) -> bytes:
         """Attack: Store message and replay it"""
         # Store the captured message
-        self.captured_messages.append((data, direction))
+        self.captured_messages[client_id].append((data, direction))
         
         print(f"Attack strategy: Capture and replay message")
-        print(f"  ✓ Message captured (total: {len(self.captured_messages)})")
+        print(f"  ✓ Message captured (total: {len(self.captured_messages[client_id])})")
         
-        # If we have a previous message, replay it
-        if len(self.captured_messages) > 1:
-            prev_msg, prev_dir = self.captured_messages[-2]
-            if prev_dir == direction:
-                print(f"  ✓ Replaying previously captured message from same direction")
-                print(f"  ✓ Round number check will fail (replay detection)")
-                return prev_msg
+        # Need at least 4 messages: msg1, msg2, msg3, then on msg4 we replay msg1
+        if len(self.captured_messages[client_id]) >= 4:
+            # On 4th message, replay 1st message instead
+            first_message, first_dir = self.captured_messages[client_id][0]
+            print(f"  ✓ REPLAYING 1st message instead of 4th message!")
+            print(f"  ✓ This will cause round number mismatch (replaying old round)")
+            return first_message
         
-        print(f"  ℹ Waiting for another message to replay")
+        print(f"  ℹ Need {4 - len(self.captured_messages[client_id])} more message(s). Capturing...")
         return data
     
-    def _attack_reorder(self, data: bytes, direction: str) -> bytes:
-        """Attack: Reorder messages"""
-        self.captured_messages.append((data, direction))
+    def _attack_reorder(self, data: bytes, client_id: int, direction: str) -> bytes:
+        """Attack: Reorder messages (legacy - use _attack_reorder_with_send instead)"""
+        return data
+    
+    def _attack_reorder_with_send(self, data: bytes, client_id: int, server_socket: socket.socket) -> str:
+        """
+        Attack: Reorder messages - send msg1, msg3, msg2
+        Returns: "ATTACK_PERFORMED", "CONTINUE", or "FORWARD_NORMAL"
+        """
+        self.captured_messages[client_id].append((data, "C→S"))
+        
+        # Get messages from client→server direction
+        same_dir_msgs = [msg for msg, d in self.captured_messages[client_id] if d == "C→S"]
+        msg_count = len(same_dir_msgs)
         
         print(f"Attack strategy: Reorder messages")
-        print(f"  ✓ Message captured (total: {len(self.captured_messages)})")
+        print(f"  ✓ Message captured (total: {msg_count})")
         
-        # If we have 2+ messages from same direction, send them out of order
-        same_dir_msgs = [msg for msg, d in self.captured_messages if d == direction]
-        if len(same_dir_msgs) >= 2:
-            print(f"  ✓ Sending older message instead of current one")
-            print(f"  ✓ Round number will be out of sequence")
-            return same_dir_msgs[-2]  # Send second-to-last message
+        # Forward msg1 normally
+        if msg_count == 1:
+            print(f"  ℹ Message 1/3 - forwarding normally...")
+            self._send_message(server_socket, data)
+            return "CONTINUE"
         
-        print(f"  ℹ Need more messages to reorder")
-        return data
+        # Forward msg2 normally too (capture but send)
+        if msg_count == 2:
+            print(f"  ℹ Message 2/3 - forwarding normally (but capturing for replay)...")
+            self._send_message(server_socket, data)
+            return "CONTINUE"
+        
+        # On msg3: send msg3 FIRST, then replay msg2 (reorder)
+        if msg_count >= 3:
+            msg2 = same_dir_msgs[1]  # Second message
+            msg3 = data  # Current message (third)
+            
+            print(f"  ✓ REORDERING: Sending msg3 first, then replaying msg2!")
+            print(f"  ✓ Server receives: msg1 → msg2 → msg3 → msg2")
+            print(f"  ✓ This creates a duplicate/reordered round violation")
+            
+            # Send msg3 first (current round)
+            self._send_message(server_socket, msg3)
+            # Then replay msg2 (out of order - old round)
+            self._send_message(server_socket, msg2)
+            
+            return "ATTACK_PERFORMED"
+        
+        # Shouldn't reach here
+        self._send_message(server_socket, data)
+        return "CONTINUE"
     
     def _attack_key_desync(self, data: bytes) -> bytes:
         """Attack: Modify round number to cause key desynchronization"""
         print("Attack strategy: Modify round number to desynchronize keys")
         
-        if len(data) < 23:  # Minimum header size
-            print("  Message too short")
+        if len(data) < 23:
+            print(f"  ⚠ Message too short ({len(data)} bytes)")
             return data
         
         # Parse and modify round number in header
@@ -398,23 +653,25 @@ class MITMAttacker:
         
         return bytes(modified)
     
-    def _cleanup_sockets(self, sock1: socket.socket, sock2: socket.socket):
-        """Close both sockets"""
-        try:
-            sock1.close()
-        except:
-            pass
-        try:
-            sock2.close()
-        except:
-            pass
-        self.running = False
+    def _cleanup_all_clients(self):
+        """Close all client and server connections"""
+        with self.clients_lock:
+            for client_id, conn in self.clients.items():
+                try:
+                    conn.client_socket.close()
+                except:
+                    pass
+                try:
+                    conn.server_socket.close()
+                except:
+                    pass
+            self.clients.clear()
 
 
 def main():
     """Main function"""
     parser = argparse.ArgumentParser(
-        description='Man-in-the-Middle Attacker for Secure Communication Protocol',
+        description='Interactive Man-in-the-Middle Attacker for Secure Communication Protocol',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Attack Types:
@@ -425,23 +682,21 @@ Attack Types:
 
 Example Usage:
   # Start real server on port 9999
-  python server.py --port 9999 --key <hex_key>
+  python server.py --port 9999
   
-  # Start attacker proxy on port 8888 (clients connect here)
-  python attacks.py --attack 1 --client-port 8888 --server-port 9999
+  # Start attacker proxy on port 8888
+  python attacks.py --client-port 8888 --server-port 9999
   
-  # Connect client to attacker's port (not real server)
-  python client.py --port 8888 --key <hex_key> -i
+  # Connect clients to attacker's port (multiple clients supported)
+  python client.py --id 1 --key c19b4d0dbb2550550314f0551d829e14 --port 8888 -i
+  python client.py --id 2 --key fc1288ba000ab08d9bda2cd6eabd15ef --port 8888 -i
   
-  # Send a message - attacker will intercept and modify it
-  > Hello server
+  # Attacker will show connected clients and prompt for attack target
         """
     )
     
-    parser.add_argument('--attack', choices=['1', '2', '3', '4'], required=True,
-                        help='Attack type: 1=Incorrect HMAC, 2=Replay, 3=Reorder, 4=Key desync')
     parser.add_argument('--client-port', type=int, default=8888,
-                        help='Port for client to connect to (default: 8888)')
+                        help='Port for clients to connect to (default: 8888)')
     parser.add_argument('--server-host', default='localhost',
                         help='Real server host (default: localhost)')
     parser.add_argument('--server-port', type=int, default=9999,
@@ -449,37 +704,34 @@ Example Usage:
     
     args = parser.parse_args()
     
-    # Display attack info
-    attack_name = MITMAttacker.ATTACK_TYPES.get(args.attack, "Unknown")
+    # Display attacker info
     print("\n" + "="*70)
-    print("  MAN-IN-THE-MIDDLE ATTACKER")
+    print("  INTERACTIVE MAN-IN-THE-MIDDLE ATTACKER")
     print("="*70)
-    print(f"Attack Type: {attack_name}")
-    print(f"Client connects to: localhost:{args.client_port}")
-    print(f"Attacker forwards to: {args.server_host}:{args.server_port}")
+    print(f"Client port: {args.client_port}")
+    print(f"Server: {args.server_host}:{args.server_port}")
     print("\nInstructions:")
-    print(f"  1. Start the real server: python server.py --port {args.server_port} --key <key>")
+    print(f"  1. Start the real server: python server.py --port {args.server_port}")
     print(f"  2. This attacker is listening on port {args.client_port}")
-    print(f"  3. Start client: python client.py --port {args.client_port} --key <key> -i")
-    print(f"  4. Send messages - attacker will intercept and modify")
+    print(f"  3. Connect clients: python client.py --id <ID> --key <key> --port {args.client_port} -i")
+    print(f"  4. Attacker will show connected clients")
+    print(f"  5. Select which client to attack and attack type")
+    print(f"  6. Only the attacked client will be terminated")
     print("="*70 + "\n")
     
     # Create and start attacker
     attacker = MITMAttacker(
         client_port=args.client_port,
         server_host=args.server_host,
-        server_port=args.server_port,
-        attack_type=args.attack
+        server_port=args.server_port
     )
     
     try:
         attacker.start()
     except KeyboardInterrupt:
-        print("\n\nShutting down attacker...")
+        print("\n\nAttacker stopped by user")
     except Exception as e:
-        print(f"\nError: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Fatal error: {e}")
 
 
 if __name__ == "__main__":

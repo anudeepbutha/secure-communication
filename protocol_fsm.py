@@ -14,9 +14,8 @@ Error Handling:
 """
 
 from enum import Enum, auto
-from typing import Dict, Set, Optional, Callable, Any
+from typing import Dict, Set, Optional, Callable
 import struct
-import time
 import os
 from dataclasses import dataclass, field
 
@@ -250,9 +249,10 @@ class ClientProtocol(ProtocolFSM):
     4. Receive SERVER_AGGR_RESPONSE (opcode 40)
     """
     
-    def __init__(self, pre_shared_key: bytes):
+    def __init__(self, pre_shared_key: bytes, client_id: int = 1):
         super().__init__(is_server=False)
         self.pre_shared_key = pre_shared_key
+        self.client_id = client_id
         self.client_random: Optional[bytes] = None
         self.server_random: Optional[bytes] = None
     
@@ -268,9 +268,9 @@ class ClientProtocol(ProtocolFSM):
         self.client_random = os.urandom(32)  # 32 random bytes
         self.session_id = generate_session_id()
         
-        # Payload: client_random + session_id + protocol_version
+        # Payload: client_random + session_id + protocol_version + client_id
         protocol_version = struct.pack('>H', 1)  # Version 1.0
-        payload = self.client_random + self.session_id + protocol_version
+        payload = self.client_random + self.session_id + protocol_version + bytes([self.client_id])
         
         self.sequence_number += 1
         self.transition_to(ProtocolState.HELLO_SENT)
@@ -319,9 +319,6 @@ class ClientProtocol(ProtocolFSM):
         # Store S2C keys for receiving (Server → Client)
         self.s2c_encryption_key = s2c_enc  # S2C_Enc_0 = H(Ki || "S2C-ENC")
         self.s2c_mac_key = s2c_mac          # S2C_Mac_0 = H(Ki || "S2C-MAC")
-        
-        # Derive client_id from session_id (use first byte as client ID)
-        self.client_id = self.session_id[0]  # Single byte (0-255)
         
         # Create secure message handler for sending (client uses C2S keys)
         self.secure_message = SecureMessage(
@@ -436,9 +433,10 @@ class ServerProtocol(ProtocolFSM):
     4. Send SERVER_AGGR_RESPONSE (opcode 40)
     """
     
-    def __init__(self, pre_shared_key: bytes):
+    def __init__(self, pre_shared_key: bytes, client_id: int = 1):
         super().__init__(is_server=True)
         self.pre_shared_key = pre_shared_key
+        self.client_id = client_id
         self.client_random: Optional[bytes] = None
         self.server_random: Optional[bytes] = None
     
@@ -511,9 +509,6 @@ class ServerProtocol(ProtocolFSM):
         # Server receives with C2S keys (Client → Server)
         self.c2s_encryption_key = c2s_enc  # C2S_Enc_0 = H(Ki || "C2S-ENC")
         self.c2s_mac_key = c2s_mac          # C2S_Mac_0 = H(Ki || "C2S-MAC")
-        
-        # Derive client_id from session_id (use first byte as client ID)
-        self.client_id = self.session_id[0]  # Single byte (0-255)
         
         # Create receiver for C2S messages (client→server)
         # Receiver direction should match the incoming message direction (C2S = direction 0)
