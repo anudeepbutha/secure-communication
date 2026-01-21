@@ -147,6 +147,58 @@ def derive_directional_keys(master_key: bytes) -> Tuple[bytes, bytes, bytes, byt
     return c2s_enc, c2s_mac, s2c_enc, s2c_mac
 
 
+def evolve_c2s_keys(c2s_enc: bytes, c2s_mac: bytes, ciphertext: bytes, iv: bytes) -> Tuple[bytes, bytes]:
+    """
+    Evolve Client→Server keys for the next round.
+    
+    Key Evolution (Round R → R+1):
+        C2S_Enc_R+1 = H(C2S_Enc_R || Ciphertext_R)
+        C2S_Mac_R+1 = H(C2S_Mac_R || Nonce_R)
+    
+    Args:
+        c2s_enc: Current C2S encryption key (16 bytes)
+        c2s_mac: Current C2S MAC key (32 bytes)
+        ciphertext: Ciphertext from round R
+        iv: IV/Nonce from round R (16 bytes)
+    
+    Returns:
+        Tuple of (new_c2s_enc, new_c2s_mac)
+    """
+    # C2S_Enc_R+1 = H(C2S_Enc_R || Ciphertext_R)
+    new_c2s_enc = hash_data(c2s_enc + ciphertext)[:16]  # First 16 bytes for AES-128
+    
+    # C2S_Mac_R+1 = H(C2S_Mac_R || Nonce_R)
+    new_c2s_mac = hash_data(c2s_mac + iv)  # Full 32 bytes for HMAC-SHA256
+    
+    return new_c2s_enc, new_c2s_mac
+
+
+def evolve_s2c_keys(s2c_enc: bytes, s2c_mac: bytes, aggregated_data: bytes, status_code: bytes) -> Tuple[bytes, bytes]:
+    """
+    Evolve Server→Client keys for the next round.
+    
+    Key Evolution (Round R → R+1):
+        S2C_Enc_R+1 = H(S2C_Enc_R || AggregatedData_R)
+        S2C_Mac_R+1 = H(S2C_Mac_R || StatusCode_R)
+    
+    Args:
+        s2c_enc: Current S2C encryption key (16 bytes)
+        s2c_mac: Current S2C MAC key (32 bytes)
+        aggregated_data: Aggregated/response data from round R
+        status_code: Status code from round R
+    
+    Returns:
+        Tuple of (new_s2c_enc, new_s2c_mac)
+    """
+    # S2C_Enc_R+1 = H(S2C_Enc_R || AggregatedData_R)
+    new_s2c_enc = hash_data(s2c_enc + aggregated_data)[:16]  # First 16 bytes for AES-128
+    
+    # S2C_Mac_R+1 = H(S2C_Mac_R || StatusCode_R)
+    new_s2c_mac = hash_data(s2c_mac + status_code)  # Full 32 bytes for HMAC-SHA256
+    
+    return new_s2c_enc, new_s2c_mac
+
+
 def hash_data(data: bytes) -> bytes:
     """Compute SHA-256 hash of data"""
     return hashlib.sha256(data).digest()
@@ -389,6 +441,7 @@ class SecureMessage:
         5. Construct message header fields
         6. Compute HMAC over (Header || Ciphertext)
         7. Transmit (Header || Ciphertext || HMAC)
+        8. Evolve keys for next round
         
         Args:
             plaintext: Data to send
@@ -423,7 +476,25 @@ class SecureMessage:
         mac = compute_hmac(self.mac_key, message)
         
         # Step 7: Transmit (Header || Ciphertext || HMAC)
-        return message + mac
+        full_message = message + mac
+        
+        # Step 8: Evolve keys for next round
+        if self.direction == 0:  # C2S (Client → Server)
+            # C2S_Enc_R+1 = H(C2S_Enc_R || Ciphertext_R)
+            # C2S_Mac_R+1 = H(C2S_Mac_R || Nonce_R)
+            self.encryption_key, self.mac_key = evolve_c2s_keys(
+                self.encryption_key, self.mac_key, ciphertext, iv
+            )
+        else:  # S2C (Server → Client)
+            # S2C_Enc_R+1 = H(S2C_Enc_R || AggregatedData_R)
+            # S2C_Mac_R+1 = H(S2C_Mac_R || StatusCode_R)
+            # Use plaintext as aggregated data and opcode as status
+            status_code = struct.pack('>B', opcode)
+            self.encryption_key, self.mac_key = evolve_s2c_keys(
+                self.encryption_key, self.mac_key, plaintext, status_code
+            )
+        
+        return full_message
     
     def parse_message(self, data: bytes) -> Tuple[bytes, int, int]:
         """
@@ -496,6 +567,22 @@ class SecureMessage:
         
         # Update round number after successful verification
         self.last_received_round = round_number
+        
+        # Step 7: Evolve keys for next round after successful decryption
+        if self.direction == 0:  # C2S (receiving client→server messages)
+            # C2S_Enc_R+1 = H(C2S_Enc_R || Ciphertext_R)
+            # C2S_Mac_R+1 = H(C2S_Mac_R || Nonce_R)
+            self.encryption_key, self.mac_key = evolve_c2s_keys(
+                self.encryption_key, self.mac_key, ciphertext, iv
+            )
+        else:  # S2C (receiving server→client messages)
+            # S2C_Enc_R+1 = H(S2C_Enc_R || AggregatedData_R)
+            # S2C_Mac_R+1 = H(S2C_Mac_R || StatusCode_R)
+            # Use plaintext as aggregated data and opcode as status
+            status_code = struct.pack('>B', opcode)
+            self.encryption_key, self.mac_key = evolve_s2c_keys(
+                self.encryption_key, self.mac_key, plaintext, status_code
+            )
         
         return plaintext, opcode, round_number
     

@@ -1,10 +1,18 @@
 """
-Attack Demonstrations for Secure Communication Protocol
-Demonstrates various attacks and how the protocol defends against them:
-- Replay Attack
-- Man-in-the-Middle Attack
-- Message Tampering
-- Nonce Reuse Attack
+Interactive Man-in-the-Middle Attacker
+Acts as a proxy between client and server, intercepting and modifying messages.
+
+Supported Attacks:
+1. Incorrect HMAC - Tampers with message content
+2. Replay attacks - Replays captured encrypted messages
+3. Message reordering - Reorders message sequence
+4. Key desynchronization - Modifies messages to cause key desync
+
+Usage:
+    1. Start real server: python server.py --port 9999 --key <hex_key>
+    2. Start attacker: python attacks.py --attack 1 --client-port 8888 --server-port 9999
+    3. Connect client to attacker's port: python client.py --port 8888 --key <hex_key> -i
+    4. Send messages - attacker will intercept and modify them
 """
 
 import socket
@@ -13,7 +21,10 @@ import time
 import threading
 import logging
 import os
-from typing import Optional, Tuple
+import sys
+import argparse
+from typing import Optional, Tuple, Dict
+from collections import deque
 
 from crypto_utils import (
     generate_key, CryptoError, SecureMessage,
@@ -27,401 +38,448 @@ from protocol_fsm import (
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger('Attacks')
+logger = logging.getLogger('MITMAttacker')
 
 
-class AttackResult:
-    """Result of an attack attempt"""
-    
-    def __init__(self, attack_name: str, success: bool, description: str):
-        self.attack_name = attack_name
-        self.success = success
-        self.description = description
-    
-    def __str__(self):
-        status = "✓ DETECTED" if not self.success else "✗ SUCCEEDED"
-        return f"[{status}] {self.attack_name}: {self.description}"
-
-
-def demonstrate_replay_attack() -> AttackResult:
+class MITMAttacker:
     """
-    Demonstrate replay attack and how the protocol prevents it.
-    
-    A replay attack involves capturing a valid encrypted message and
-    replaying it later. The protocol prevents this using:
-    1. Nonces (numbers used once)
-    2. Timestamps
-    3. Sequence numbers
+    Man-in-the-Middle Attacker Proxy
+    Sits between client and server, intercepting and modifying messages.
     """
-    print("\n" + "="*60)
-    print("REPLAY ATTACK DEMONSTRATION")
-    print("="*60)
     
-    # Setup: Create a secure session
-    encryption_key = generate_key()
-    mac_key = generate_key()
-    client_id = 1  # Example client ID
+    ATTACK_TYPES = {
+        '1': 'Incorrect HMAC',
+        '2': 'Replay attacks',
+        '3': 'Message reordering',
+        '4': 'Key desynchronization'
+    }
     
-    # Legitimate sender creates a message
-    sender = SecureMessage(encryption_key, mac_key, client_id, direction=0)
-    receiver = SecureMessage(encryption_key, mac_key, client_id, direction=0)
-    
-    # Create and send a legitimate message
-    original_message = b"Transfer $1000 to account 12345"
-    encrypted = sender.create_message(original_message)
-    
-    print(f"1. Legitimate message created: '{original_message.decode()}'")
-    print(f"   Encrypted length: {len(encrypted)} bytes")
-    
-    # Legitimate receiver processes the message
-    try:
-        decrypted, msg_type, seq_num = receiver.parse_message(encrypted)
-        print(f"2. Receiver processed message: '{decrypted.decode()}'")
-        print(f"   Sequence number: {seq_num}")
-    except CryptoError as e:
-        return AttackResult("Replay Attack", False, f"Initial message failed: {e}")
-    
-    # ATTACK: Attacker captures and replays the exact same message
-    print("\n3. ATTACKER: Replaying captured message...")
-    
-    try:
-        # Try to replay the same message
-        decrypted, msg_type, seq_num = receiver.parse_message(encrypted)
-        print(f"   Attack succeeded! Got: '{decrypted.decode()}'")
-        return AttackResult(
-            "Replay Attack",
-            True,
-            "The replayed message was accepted (BAD - protocol vulnerability)"
-        )
-    except CryptoError as e:
-        print(f"   Attack blocked! Error: {e}")
-        return AttackResult(
-            "Replay Attack",
-            False,
-            f"Protocol correctly detected replay: {e}"
-        )
-
-
-def demonstrate_packet_drop_reorder() -> AttackResult:
-    """
-    Demonstrate packet drop and reorder attack.
-    
-    Attack 3: Drop or reorder packets
-    The attacker drops messages or delivers them out of order.
-    The protocol detects this using sequence numbers.
-    """
-    print("\n" + "="*60)
-    print("PACKET DROP/REORDER ATTACK DEMONSTRATION")
-    print("="*60)
-    
-    # Setup: Create a secure session
-    encryption_key = generate_key()
-    mac_key = generate_key()
-    client_id = 1  # Example client ID
-    
-    sender = SecureMessage(encryption_key, mac_key, client_id, direction=0)
-    receiver = SecureMessage(encryption_key, mac_key, client_id, direction=0)
-    
-    # Create a sequence of messages
-    messages = [
-        b"Message 1",
-        b"Message 2",
-        b"Message 3",
-        b"Message 4"
-    ]
-    
-    encrypted_msgs = [sender.create_message(msg) for msg in messages]
-    
-    print("1. Legitimate sequence created:")
-    for i, msg in enumerate(messages, 1):
-        print(f"   Message {i}: '{msg.decode()}'")
-    
-    # Process messages in order (should work)
-    print("\n2. Processing messages in correct order:")
-    for i, enc_msg in enumerate(encrypted_msgs, 1):
-        try:
-            decrypted, _, seq = receiver.parse_message(enc_msg)
-            print(f"   ✓ Message {i} accepted (seq={seq}): '{decrypted.decode()}'")
-        except CryptoError as e:
-            print(f"   ✗ Message {i} rejected: {e}")
-            return AttackResult("Packet Drop/Reorder", True, "Valid message rejected")
-    
-    # ATTACK 1: Try to replay message 2 (drop and replay)
-    print("\n3. ATTACKER: Replaying Message 2 (already processed)...")
-    try:
-        decrypted, _, seq = receiver.parse_message(encrypted_msgs[1])
-        print(f"   ✗ Attack succeeded! Replay accepted: '{decrypted.decode()}'")
-        return AttackResult("Packet Drop/Reorder", True, "Replay attack succeeded")
-    except CryptoError as e:
-        print(f"   ✓ Attack blocked: {e}")
-    
-    # ATTACK 2: Create new session and deliver messages out of order
-    print("\n4. ATTACKER: Delivering messages out of order...")
-    client_id2 = 2  # Different client ID
-    sender2 = SecureMessage(encryption_key, mac_key, client_id2, direction=0)
-    receiver2 = SecureMessage(encryption_key, mac_key, client_id2, direction=0)
-    
-    msg_a = sender2.create_message(b"First message")
-    msg_b = sender2.create_message(b"Second message")
-    msg_c = sender2.create_message(b"Third message")
-    
-    print("   Normal order: First -> Second -> Third")
-    print("   Attacker delivers: Second -> First -> Third (reordered)")
-    
-    # Try to deliver second message first
-    try:
-        # Process first message normally
-        decrypted, _, _ = receiver2.parse_message(msg_a)
-        print(f"   ✓ First message accepted: '{decrypted.decode()}'")
+    def __init__(self, client_port: int, server_host: str, server_port: int, attack_type: str):
+        """
+        Initialize MITM attacker.
         
-        # Attacker tries to deliver third before second
-        decrypted, _, _ = receiver2.parse_message(msg_c)
-        print(f"   ✗ Third message accepted out of order: '{decrypted.decode()}'")
-        return AttackResult("Packet Drop/Reorder", True, "Out-of-order delivery accepted")
-    except CryptoError as e:
-        print(f"   ✓ Out-of-order delivery blocked: {e}")
+        Args:
+            client_port: Port to listen for client connections
+            server_host: Real server host
+            server_port: Real server port
+            attack_type: Type of attack to perform (1-4)
+        """
+        self.client_port = client_port
+        self.server_host = server_host
+        self.server_port = server_port
+        self.attack_type = attack_type
+        self.attack_name = self.ATTACK_TYPES.get(attack_type, "Unknown")
+        self.running = False
+        
+        # Storage for captured messages
+        self.captured_messages: deque = deque(maxlen=10)
+        self.message_count = 0
+        self.attack_performed = False
+        
+        logger.info(f"MITM Attacker initialized")
+        logger.info(f"Attack type: {self.attack_name}")
+        logger.info(f"Listening on port {client_port}, forwarding to {server_host}:{server_port}")
     
-    return AttackResult(
-        "Packet Drop/Reorder",
-        False,
-        "Sequence numbers prevent replay and reordering attacks"
-    )
-
-
-def demonstrate_message_tampering() -> AttackResult:
-    """
-    Demonstrate message tampering attack and how the protocol prevents it.
+    def start(self):
+        """Start the MITM proxy"""
+        self.running = True
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(('localhost', self.client_port))
+        listener.listen(1)
+        
+        print("\n" + "="*70)
+        print(f"  MITM ATTACKER ACTIVE - Attack Type: {self.attack_name}")
+        print("="*70)
+        print(f"Listening for client on port {self.client_port}...")
+        print(f"Will forward to server at {self.server_host}:{self.server_port}")
+        print("Waiting for client connection...\n")
+        
+        try:
+            client_socket, client_addr = listener.accept()
+            logger.info(f"Client connected from {client_addr}")
+            print(f"✓ Client connected from {client_addr}")
+            
+            # Connect to real server
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.connect((self.server_host, self.server_port))
+            logger.info(f"Connected to real server at {self.server_host}:{self.server_port}")
+            print(f"✓ Connected to server at {self.server_host}:{self.server_port}\n")
+            
+            # Start forwarding threads
+            client_to_server = threading.Thread(
+                target=self._forward_client_to_server,
+                args=(client_socket, server_socket),
+                daemon=True
+            )
+            server_to_client = threading.Thread(
+                target=self._forward_server_to_client,
+                args=(server_socket, client_socket),
+                daemon=True
+            )
+            
+            client_to_server.start()
+            server_to_client.start()
+            
+            # Wait for threads to complete
+            client_to_server.join()
+            server_to_client.join()
+            
+        except KeyboardInterrupt:
+            print("\n\nAttacker interrupted by user")
+        except Exception as e:
+            logger.error(f"Error: {e}")
+        finally:
+            listener.close()
+            self.running = False
+            print("\nMITM Attacker stopped")
     
-    The attacker tries to modify an encrypted message without knowing the key.
-    The protocol prevents this using:
-    1. AES-GCM authenticated encryption
-    2. HMAC message authentication
-    """
-    print("\n" + "="*60)
-    print("MESSAGE TAMPERING ATTACK DEMONSTRATION")
-    print("="*60)
+    def _recv_message(self, sock: socket.socket) -> Optional[bytes]:
+        """Receive a length-prefixed message"""
+        try:
+            # Read 4-byte length prefix
+            length_data = self._recv_exact(sock, 4)
+            if not length_data:
+                return None
+            
+            length = struct.unpack('>I', length_data)[0]
+            
+            # Read message data
+            data = self._recv_exact(sock, length)
+            if not data:
+                return None
+            
+            return length_data + data  # Return with length prefix
+        except Exception as e:
+            logger.debug(f"Error receiving message: {e}")
+            return None
     
-    # Setup
-    encryption_key = generate_key()
-    mac_key = generate_key()
-    client_id = 1  # Example client ID
+    def _recv_exact(self, sock: socket.socket, n: int) -> Optional[bytes]:
+        """Receive exactly n bytes"""
+        data = b''
+        while len(data) < n:
+            chunk = sock.recv(n - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
     
-    sender = SecureMessage(encryption_key, mac_key, client_id, direction=0)
-    receiver = SecureMessage(encryption_key, mac_key, client_id, direction=0)
+    def _send_message(self, sock: socket.socket, message: bytes):
+        """Send a message (already has length prefix)"""
+        sock.sendall(message)
     
-    # Create legitimate message
-    original_message = b"Transfer $100 to Bob"
-    encrypted = sender.create_message(original_message)
+    def _forward_client_to_server(self, client_sock: socket.socket, server_sock: socket.socket):
+        """Forward messages from client to server with potential attacks"""
+        print("="*70)
+        print("FORWARDING: Client → Server (with attack capability)")
+        print("="*70 + "\n")
+        
+        while self.running:
+            try:
+                message = self._recv_message(client_sock)
+                if not message:
+                    logger.info("Client disconnected")
+                    break
+                
+                self.message_count += 1
+                length = struct.unpack('>I', message[:4])[0]
+                data = message[4:]
+                
+                logger.info(f"[C→S] Message #{self.message_count}: {length} bytes")
+                
+                # Check if this is an encrypted data message (after handshake)
+                if self._is_encrypted_data_message(data) and not self.attack_performed:
+                    print("\n" + "🎯"*35)
+                    print(f"ENCRYPTED DATA MESSAGE INTERCEPTED! (Message #{self.message_count})")
+                    print("🎯"*35)
+                    
+                    # Perform attack
+                    modified_message = self._perform_attack(message, "C→S")
+                    
+                    if modified_message != message:
+                        self.attack_performed = True
+                        print(f"\n⚠️  ATTACK EXECUTED: {self.attack_name}")
+                        print("⚠️  Modified message sent to server")
+                        print("⚠️  Server should detect tampering and terminate connection\n")
+                        self._send_message(server_sock, modified_message)
+                    else:
+                        self._send_message(server_sock, message)
+                else:
+                    # Forward handshake messages normally
+                    self._send_message(server_sock, message)
+                    logger.debug(f"[C→S] Forwarded normally")
+                
+            except Exception as e:
+                logger.error(f"Error in client→server forwarding: {e}")
+                break
+        
+        self._cleanup_sockets(client_sock, server_sock)
     
-    print(f"1. Original message: '{original_message.decode()}'")
-    print(f"   Encrypted data: {encrypted[:32].hex()}...")
+    def _forward_server_to_client(self, server_sock: socket.socket, client_sock: socket.socket):
+        """Forward messages from server to client with potential attacks"""
+        print("="*70)
+        print("FORWARDING: Server → Client (with attack capability)")
+        print("="*70 + "\n")
+        
+        while self.running:
+            try:
+                message = self._recv_message(server_sock)
+                if not message:
+                    logger.info("Server disconnected")
+                    break
+                
+                length = struct.unpack('>I', message[:4])[0]
+                data = message[4:]
+                
+                logger.info(f"[S→C] Response: {length} bytes")
+                
+                # Check if this is an encrypted data message
+                if self._is_encrypted_data_message(data) and not self.attack_performed:
+                    print("\n" + "🎯"*35)
+                    print(f"ENCRYPTED RESPONSE INTERCEPTED!")
+                    print("🎯"*35)
+                    
+                    # Perform attack on server responses too
+                    modified_message = self._perform_attack(message, "S→C")
+                    
+                    if modified_message != message:
+                        self.attack_performed = True
+                        print(f"\n⚠️  ATTACK EXECUTED: {self.attack_name}")
+                        print("⚠️  Modified message sent to client")
+                        print("⚠️  Client should detect tampering and terminate connection\n")
+                        self._send_message(client_sock, modified_message)
+                    else:
+                        self._send_message(client_sock, message)
+                else:
+                    # Forward normally
+                    self._send_message(client_sock, message)
+                    logger.debug(f"[S→C] Forwarded normally")
+                
+            except Exception as e:
+                logger.error(f"Error in server→client forwarding: {e}")
+                break
+        
+        self._cleanup_sockets(server_sock, client_sock)
     
-    # ATTACK: Try to modify the encrypted message
-    print("\n2. ATTACKER: Attempting to modify encrypted data...")
+    def _is_encrypted_data_message(self, data: bytes) -> bool:
+        """Check if this looks like an encrypted data message (not handshake)"""
+        # Encrypted data messages are longer and don't start with handshake opcodes
+        if len(data) < 55:  # Minimum: header(23) + one block(16) + hmac(32) = 71
+            return False
+        
+        # Check if it's a protocol message (handshake)
+        try:
+            opcode = struct.unpack('>B', data[0:1])[0]
+            # Handshake opcodes: 10, 20, 30, 40, 50, 60
+            if opcode in [10, 20, 30, 40, 50, 60]:
+                return False
+            # If opcode is unusual, it might be encrypted data
+            return True
+        except:
+            return True
     
-    # Try different tampering methods
-    attacks = [
-        ("Flip a bit in ciphertext", bytearray(encrypted)),
-        ("Modify the MAC", bytearray(encrypted)),
-        ("Change sequence number", bytearray(encrypted)),
-    ]
+    def _perform_attack(self, message: bytes, direction: str) -> bytes:
+        """
+        Perform the selected attack on the message.
+        
+        Args:
+            message: Original message with length prefix
+            direction: "C→S" or "S→C"
+        
+        Returns:
+            Modified message (or original if no modification)
+        """
+        length_prefix = message[:4]
+        data = message[4:]
+        
+        print(f"\n{'='*70}")
+        print(f"PERFORMING ATTACK: {self.attack_name}")
+        print(f"Direction: {direction}")
+        print(f"Message size: {len(data)} bytes")
+        print(f"{'='*70}")
+        
+        if self.attack_type == '1':  # Incorrect HMAC
+            modified = self._attack_incorrect_hmac(data)
+        elif self.attack_type == '2':  # Replay attack
+            modified = self._attack_replay(data, direction)
+        elif self.attack_type == '3':  # Message reordering
+            modified = self._attack_reorder(data, direction)
+        elif self.attack_type == '4':  # Key desynchronization
+            modified = self._attack_key_desync(data)
+        else:
+            modified = data
+        
+        if modified != data:
+            # Update length prefix if size changed
+            new_length = struct.pack('>I', len(modified))
+            return new_length + modified
+        
+        return message
     
-    # Attack 1: Flip a bit in the ciphertext
-    tampered1 = bytearray(encrypted)
-    tampered1[40] ^= 0x01  # Flip one bit in ciphertext area
+    def _attack_incorrect_hmac(self, data: bytes) -> bytes:
+        """Attack: Flip bits in ciphertext to cause HMAC verification failure"""
+        print("Attack strategy: Tamper with ciphertext to cause HMAC failure")
+        
+        if len(data) < 55:
+            print("  Message too short to tamper")
+            return data
+        
+        # Flip a bit in the ciphertext portion (after header, before HMAC)
+        modified = bytearray(data)
+        tamper_position = 30  # Middle of message
+        original_byte = modified[tamper_position]
+        modified[tamper_position] ^= 0x01  # Flip one bit
+        
+        print(f"  ✓ Tampered byte at position {tamper_position}: 0x{original_byte:02x} → 0x{modified[tamper_position]:02x}")
+        print(f"  ✓ HMAC will fail on receiver side")
+        
+        return bytes(modified)
     
-    print("   Attack 1: Flipping bit in ciphertext...")
-    try:
-        decrypted, _, _ = receiver.parse_message(bytes(tampered1))
-        print(f"   Attack succeeded! Got: '{decrypted.decode()}'")
-        return AttackResult("Message Tampering", True, "Modified message accepted")
-    except CryptoError as e:
-        print(f"   Attack blocked: {e}")
+    def _attack_replay(self, data: bytes, direction: str) -> bytes:
+        """Attack: Store message and replay it"""
+        # Store the captured message
+        self.captured_messages.append((data, direction))
+        
+        print(f"Attack strategy: Capture and replay message")
+        print(f"  ✓ Message captured (total: {len(self.captured_messages)})")
+        
+        # If we have a previous message, replay it
+        if len(self.captured_messages) > 1:
+            prev_msg, prev_dir = self.captured_messages[-2]
+            if prev_dir == direction:
+                print(f"  ✓ Replaying previously captured message from same direction")
+                print(f"  ✓ Round number check will fail (replay detection)")
+                return prev_msg
+        
+        print(f"  ℹ Waiting for another message to replay")
+        return data
     
-    # Attack 2: Modify the MAC directly
-    tampered2 = bytearray(encrypted)
-    tampered2[-1] ^= 0x01  # Flip bit in MAC
+    def _attack_reorder(self, data: bytes, direction: str) -> bytes:
+        """Attack: Reorder messages"""
+        self.captured_messages.append((data, direction))
+        
+        print(f"Attack strategy: Reorder messages")
+        print(f"  ✓ Message captured (total: {len(self.captured_messages)})")
+        
+        # If we have 2+ messages from same direction, send them out of order
+        same_dir_msgs = [msg for msg, d in self.captured_messages if d == direction]
+        if len(same_dir_msgs) >= 2:
+            print(f"  ✓ Sending older message instead of current one")
+            print(f"  ✓ Round number will be out of sequence")
+            return same_dir_msgs[-2]  # Send second-to-last message
+        
+        print(f"  ℹ Need more messages to reorder")
+        return data
     
-    print("   Attack 2: Modifying MAC...")
-    try:
-        decrypted, _, _ = receiver.parse_message(bytes(tampered2))
-        print(f"   Attack succeeded! Got: '{decrypted.decode()}'")
-        return AttackResult("Message Tampering", True, "Modified message accepted")
-    except CryptoError as e:
-        print(f"   Attack blocked: {e}")
+    def _attack_key_desync(self, data: bytes) -> bytes:
+        """Attack: Modify round number to cause key desynchronization"""
+        print("Attack strategy: Modify round number to desynchronize keys")
+        
+        if len(data) < 23:  # Minimum header size
+            print("  Message too short")
+            return data
+        
+        # Parse and modify round number in header
+        # Format: [Opcode(1)][Client_ID(1)][Round(4)][Direction(1)][IV(16)]
+        modified = bytearray(data)
+        
+        # Extract current round number
+        current_round = struct.unpack('>I', modified[2:6])[0]
+        
+        # Increment round number artificially
+        fake_round = current_round + 10
+        modified[2:6] = struct.pack('>I', fake_round)
+        
+        print(f"  ✓ Modified round number: {current_round} → {fake_round}")
+        print(f"  ✓ This will cause key evolution desynchronization")
+        print(f"  ✓ HMAC will fail because header was modified")
+        
+        return bytes(modified)
     
-    # Attack 3: Try to change the session ID
-    tampered3 = bytearray(encrypted)
-    tampered3[0] ^= 0xFF  # Modify session ID
-    
-    print("   Attack 3: Modifying session ID...")
-    try:
-        decrypted, _, _ = receiver.parse_message(bytes(tampered3))
-        print(f"   Attack succeeded! Got: '{decrypted.decode()}'")
-        return AttackResult("Message Tampering", True, "Modified message accepted")
-    except CryptoError as e:
-        print(f"   Attack blocked: {e}")
-    
-    return AttackResult(
-        "Message Tampering",
-        False,
-        "All tampering attempts were detected by MAC/AEAD verification"
-    )
-
-
-
-
-def demonstrate_reflection_attack() -> AttackResult:
-    """
-    Demonstrate reflection attack.
-    
-    Attack 4: Reflect messages back to the sender
-    The attacker captures a message from Alice to Bob and sends it back to Alice,
-    pretending it came from Bob. The protocol detects this using session IDs.
-    """
-    print("\n" + "="*60)
-    print("REFLECTION ATTACK DEMONSTRATION")
-    print("="*60)
-    
-    # Setup: Two different clients with different directions
-    encryption_key = generate_key()
-    mac_key = generate_key()
-    
-    alice_client_id = 1
-    bob_client_id = 2
-    
-    # Alice sends with direction=0, Bob receives with direction=0
-    alice_to_bob = SecureMessage(encryption_key, mac_key, alice_client_id, direction=0)
-    # Bob sends with direction=1, Alice receives with direction=1
-    bob_to_alice = SecureMessage(encryption_key, mac_key, bob_client_id, direction=1)
-    
-    print(f"1. Setup two clients with different directions:")
-    print(f"   Alice's client ID: {alice_client_id} (direction 0)")
-    print(f"   Bob's client ID:   {bob_client_id} (direction 1)")
-    
-    # Alice sends a message to Bob
-    alice_message = b"Transfer $1000 to Bob"
-    encrypted = alice_to_bob.create_message(alice_message)
-    
-    print(f"\n2. Alice sends to Bob: '{alice_message.decode()}'")
-    
-    # ATTACK: Attacker reflects the message back to Alice
-    print("\n3. ATTACKER: Reflecting Alice's message back to her...")
-    print("   Pretending the message is from Bob to Alice")
-    
-    # Alice's receiver expects messages with direction 0
-    alice_receiver = SecureMessage(encryption_key, mac_key, alice_client_id, direction=0)
-    
-    try:
-        # Try to process Alice's own message
-        decrypted, _, _ = alice_receiver.parse_message(encrypted)
-        print(f"   ✗ Reflection succeeded! Alice processed: '{decrypted.decode()}'")
-        return AttackResult("Reflection Attack", True, "Reflected message was accepted")
-    except CryptoError as e:
-        print(f"   ✓ Reflection blocked: {e}")
-    
-    # Show how direction field prevents this
-    print("\n4. Why it failed:")
-    print(f"   Alice's message has direction: 0")
-    print(f"   Alice's receiver expects direction: 0")
-    print("   But the message came from Alice, so it's detected as reflection!")
-    
-    # Demonstrate correct usage with different directions
-    print("\n5. Correct protocol: Different directions per communication path")
-    alice_sends = SecureMessage(encryption_key, mac_key, alice_client_id, direction=0)
-    alice_receives = SecureMessage(encryption_key, mac_key, alice_client_id, direction=1)
-    
-    msg_to_bob = alice_sends.create_message(b"Hello Bob")
-    print(f"   Alice sends with direction: 0")
-    
-    # Bob receives with direction 0 (client->server)
-    bob_receives = SecureMessage(encryption_key, mac_key, alice_client_id, direction=0)
-    decrypted, _, _ = bob_receives.parse_message(msg_to_bob)
-    print(f"   Bob receives: '{decrypted.decode()}'")
-    
-    # Bob responds with direction 1 (server->client)
-    bob_sends = SecureMessage(encryption_key, mac_key, alice_client_id, direction=1)
-    msg_to_alice = bob_sends.create_message(b"Hello Alice")
-    print(f"   Bob responds with direction: 1")
-    
-    # Alice receives with direction 1
-    decrypted, _, _ = alice_receives.parse_message(msg_to_alice)
-    print(f"   Alice receives: '{decrypted.decode()}'")
-    print("   ✓ Different directions prevent reflection")
-    
-    return AttackResult(
-        "Reflection Attack",
-        False,
-        "Session ID binding prevents reflection attacks"
-    )
-
-
-def run_all_attacks():
-    """Run all attack demonstrations"""
-    print("\n" + "="*70)
-    print("     SECURE COMMUNICATION PROTOCOL - ATTACK DEMONSTRATIONS")
-    print("="*70)
-    
-    attacks = [
-        demonstrate_replay_attack,
-        demonstrate_message_tampering,
-        demonstrate_packet_drop_reorder,
-        demonstrate_reflection_attack,
-    ]
-    
-    results = []
-    for attack_fn in attacks:
-        result = attack_fn()
-        results.append(result)
-    
-    # Summary
-    print("\n" + "="*70)
-    print("                         ATTACK SUMMARY")
-    print("="*70)
-    
-    successful_attacks = [r for r in results if r.success]
-    blocked_attacks = [r for r in results if not r.success]
-    
-    print("\nBlocked Attacks (Protocol is secure against these):")
-    for r in blocked_attacks:
-        print(f"  ✓ {r.attack_name}")
-    
-    if successful_attacks:
-        print("\nSuccessful Attacks (Vulnerabilities found!):")
-        for r in successful_attacks:
-            print(f"  ✗ {r.attack_name}")
-    else:
-        print("\n✓ All attacks were successfully blocked!")
-    
-    print("\nDetailed Results:")
-    for r in results:
-        print(f"  {r}")
-    
-    return results
+    def _cleanup_sockets(self, sock1: socket.socket, sock2: socket.socket):
+        """Close both sockets"""
+        try:
+            sock1.close()
+        except:
+            pass
+        try:
+            sock2.close()
+        except:
+            pass
+        self.running = False
 
 
 def main():
     """Main function"""
-    import argparse
+    parser = argparse.ArgumentParser(
+        description='Man-in-the-Middle Attacker for Secure Communication Protocol',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Attack Types:
+  1 - Incorrect HMAC: Tamper with message content
+  2 - Replay attacks: Replay captured encrypted messages  
+  3 - Message reordering: Send messages out of order
+  4 - Key desynchronization: Modify round numbers to desync keys
+
+Example Usage:
+  # Start real server on port 9999
+  python server.py --port 9999 --key <hex_key>
+  
+  # Start attacker proxy on port 8888 (clients connect here)
+  python attacks.py --attack 1 --client-port 8888 --server-port 9999
+  
+  # Connect client to attacker's port (not real server)
+  python client.py --port 8888 --key <hex_key> -i
+  
+  # Send a message - attacker will intercept and modify it
+  > Hello server
+        """
+    )
     
-    parser = argparse.ArgumentParser(description='Attack Demonstrations')
-    parser.add_argument('--attack', choices=[
-        'replay', 'tamper', 'reorder', 'reflect', 'all'
-    ], default='all', help='Specific attack to demonstrate')
+    parser.add_argument('--attack', choices=['1', '2', '3', '4'], required=True,
+                        help='Attack type: 1=Incorrect HMAC, 2=Replay, 3=Reorder, 4=Key desync')
+    parser.add_argument('--client-port', type=int, default=8888,
+                        help='Port for client to connect to (default: 8888)')
+    parser.add_argument('--server-host', default='localhost',
+                        help='Real server host (default: localhost)')
+    parser.add_argument('--server-port', type=int, default=9999,
+                        help='Real server port (default: 9999)')
+    
     args = parser.parse_args()
     
-    attack_map = {
-        'replay': demonstrate_replay_attack,
-        'tamper': demonstrate_message_tampering,
-        'reorder': demonstrate_packet_drop_reorder,
-        'reflect': demonstrate_reflection_attack,
-        'all': run_all_attacks,
-    }
+    # Display attack info
+    attack_name = MITMAttacker.ATTACK_TYPES.get(args.attack, "Unknown")
+    print("\n" + "="*70)
+    print("  MAN-IN-THE-MIDDLE ATTACKER")
+    print("="*70)
+    print(f"Attack Type: {attack_name}")
+    print(f"Client connects to: localhost:{args.client_port}")
+    print(f"Attacker forwards to: {args.server_host}:{args.server_port}")
+    print("\nInstructions:")
+    print(f"  1. Start the real server: python server.py --port {args.server_port} --key <key>")
+    print(f"  2. This attacker is listening on port {args.client_port}")
+    print(f"  3. Start client: python client.py --port {args.client_port} --key <key> -i")
+    print(f"  4. Send messages - attacker will intercept and modify")
+    print("="*70 + "\n")
     
-    attack_fn = attack_map.get(args.attack, run_all_attacks)
-    attack_fn()
+    # Create and start attacker
+    attacker = MITMAttacker(
+        client_port=args.client_port,
+        server_host=args.server_host,
+        server_port=args.server_port,
+        attack_type=args.attack
+    )
+    
+    try:
+        attacker.start()
+    except KeyboardInterrupt:
+        print("\n\nShutting down attacker...")
+    except Exception as e:
+        print(f"\nError: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":

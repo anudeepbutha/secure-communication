@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from crypto_utils import (
     generate_key, generate_session_id, derive_keys, derive_directional_keys, hash_data,
     create_challenge, create_response, verify_response,
-    SecureMessage, CryptoError, get_timestamp
+    SecureMessage, CryptoError, get_timestamp,
+    evolve_c2s_keys, evolve_s2c_keys
 )
 
 
