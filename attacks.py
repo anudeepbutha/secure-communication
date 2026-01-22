@@ -107,9 +107,9 @@ class MITMAttacker:
             test_sock.settimeout(2)
             test_sock.connect((self.server_host, self.server_port))
             test_sock.close()
-            print(f"✓ Server is reachable at {self.server_host}:{self.server_port}")
+            print(f" Server is reachable at {self.server_host}:{self.server_port}")
         except (ConnectionRefusedError, socket.timeout, OSError) as e:
-            print(f"\n❌ ERROR: Cannot connect to server at {self.server_host}:{self.server_port}")
+            print(f"\n ERROR: Cannot connect to server at {self.server_host}:{self.server_port}")
             print(f"   Please start the server first:")
             print(f"   python server.py --port {self.server_port} --mode command")
             print(f"\n   Error details: {e}\n")
@@ -197,12 +197,12 @@ class MITMAttacker:
                     target_id = int(client_input)
                     with self.clients_lock:
                         if target_id not in self.clients:
-                            print(f"❌ Client {target_id} not connected!")
+                            print(f" Client {target_id} not connected!")
                             time.sleep(1)
                             continue
                         
                         if not self.clients[target_id].active:
-                            print(f"❌ Client {target_id} is already disconnected!")
+                            print(f" Client {target_id} is already disconnected!")
                             time.sleep(1)
                             continue
                     
@@ -213,7 +213,7 @@ class MITMAttacker:
                     
                     attack_input = input("\nSelect attack type (1-4): ").strip()
                     if attack_input not in self.ATTACK_TYPES:
-                        print("❌ Invalid attack type!")
+                        print(" Invalid attack type!")
                         time.sleep(1)
                         continue
                     
@@ -225,7 +225,7 @@ class MITMAttacker:
                     
                     # Special handling for replay attack
                     if attack_input == '2':  # Replay attack
-                        print(f"\n✓ Attack configured: Replay Attack")
+                        print(f"\n Attack configured: Replay Attack")
                         print(f"  Target: Client {target_id}")
                         print(f"\nStrategy:")
                         print(f"  1. Capturing messages from Client {target_id}'s active session")
@@ -248,7 +248,7 @@ class MITMAttacker:
                         
                     else:
                         # Normal attack handling (during active session)
-                        print(f"\n✓ Attack configured:")
+                        print(f"\n Attack configured:")
                         print(f"  Target: Client {target_id}")
                         print(f"  Attack: {self.attack_name}")
                         print(f"\nWaiting for Client {target_id} to send a message...")
@@ -258,7 +258,7 @@ class MITMAttacker:
                             time.sleep(0.5)
                         
                         if self.attack_performed.get(target_id, False):
-                            print(f"\n✓ Attack executed on Client {target_id}!")
+                            print(f"\n Attack executed on Client {target_id}!")
                             print(f"  Client {target_id} connection terminated.")
                     
                     # Reset for next attack
@@ -268,7 +268,7 @@ class MITMAttacker:
                     time.sleep(2)
                     
                 except ValueError:
-                    print("❌ Invalid input! Please enter a number.")
+                    print(" Invalid input! Please enter a number.")
                     time.sleep(1)
                     
             except Exception as e:
@@ -287,7 +287,7 @@ class MITMAttacker:
                 server_sock.connect((self.server_host, self.server_port))
                 logger.info(f"[{client_addr}] Connected to real server")
             except ConnectionRefusedError:
-                print(f"\n❌ ERROR: Cannot connect to server at {self.server_host}:{self.server_port}")
+                print(f"\n ERROR: Cannot connect to server at {self.server_host}:{self.server_port}")
                 print(f"   Make sure the server is running:")
                 print(f"   python server.py --port {self.server_port} --mode command\n")
                 logger.error(f"[{client_addr}] Server not running at {self.server_host}:{self.server_port}")
@@ -332,7 +332,7 @@ class MITMAttacker:
                 self.clients[client_id] = conn
                 self.captured_messages[client_id] = deque(maxlen=10)
             
-            print(f"\n✓ Client {client_id} connected from {client_addr}")
+            print(f"\n Client {client_id} connected from {client_addr}")
             
             # Start bidirectional forwarding
             c2s_thread = threading.Thread(
@@ -363,7 +363,7 @@ class MITMAttacker:
                         # Save captured messages when session ends for replay attack
                         if client_id in self.captured_messages and len(self.captured_messages[client_id]) > 0:
                             self.saved_session_messages[client_id] = list(self.captured_messages[client_id])
-                            print(f"\n✓ Saved {len(self.saved_session_messages[client_id])} messages from Client {client_id} for potential replay attack")
+                            print(f"\n Saved {len(self.saved_session_messages[client_id])} messages from Client {client_id} for potential replay attack")
                 
                 print(f"\n✗ Client {client_id} disconnected")
             
@@ -425,7 +425,7 @@ class MITMAttacker:
                     if self.attack_type == '2':  # Replay attack
                         # Just capture and forward - actual attack happens after session
                         self.captured_messages[client_id].append((message[4:], "C→S"))  # Remove length prefix
-                        print(f"  ✓ Message captured for replay attack (total: {len(self.captured_messages[client_id])})")
+                        print(f"   Message captured for replay attack (total: {len(self.captured_messages[client_id])})")
                         print(f"  ℹ️  Forwarding normally. Attack will execute after client disconnects.")
                         self._send_message(conn.server_socket, message)
                         continue
@@ -435,7 +435,7 @@ class MITMAttacker:
                         result = self._attack_reorder_with_send(message, client_id, conn.server_socket)
                         if result == "ATTACK_PERFORMED":
                             self.attack_performed[client_id] = True
-                            print(f"\n⚠️  Attack performed on Client {client_id}. Terminating connection...")
+                            print(f"\n  Attack performed on Client {client_id}. Terminating connection...")
                             conn.active = False
                             break
                         elif result == "CONTINUE":
@@ -456,7 +456,7 @@ class MITMAttacker:
                         if attack_actually_performed:
                             self.attack_performed[client_id] = True
                             # Terminate this client after attack
-                            print(f"\n⚠️  Attack performed on Client {client_id}. Terminating connection...")
+                            print(f"\n  Attack performed on Client {client_id}. Terminating connection...")
                             conn.active = False
                             break
                         else:
@@ -558,7 +558,7 @@ class MITMAttacker:
         data = message[4:]
         
         print(f"\n{'='*70}")
-        print(f"⚡ PERFORMING ATTACK: {self.attack_name}")
+        print(f" PERFORMING ATTACK: {self.attack_name}")
         print(f"Target: Client {client_id}")
         print(f"Direction: {direction}")
         print(f"Message size: {len(data)} bytes")
@@ -576,7 +576,7 @@ class MITMAttacker:
             modified = data
         
         if modified != data:
-            print(f"✓ Message modified for attack")
+            print(f" Message modified for attack")
             return length_prefix + modified
         
         return message
@@ -595,8 +595,7 @@ class MITMAttacker:
         original_byte = modified[tamper_position]
         modified[tamper_position] ^= 0x01  # Flip one bit
         
-        print(f"  ✓ Tampered byte at position {tamper_position}: 0x{original_byte:02x} → 0x{modified[tamper_position]:02x}")
-        print(f"  ✓ HMAC will fail on receiver side")
+        print(f"   Tampered byte at position {tamper_position}: 0x{original_byte:02x} → 0x{modified[tamper_position]:02x}")
         
         return bytes(modified)
     
@@ -606,7 +605,7 @@ class MITMAttacker:
         self.captured_messages[client_id].append((data, direction))
         
         print(f"Attack strategy: Capture messages for replay after session ends")
-        print(f"  ✓ Message captured (total: {len(self.captured_messages[client_id])})")
+        print(f"   Message captured (total: {len(self.captured_messages[client_id])})")
         print(f"  ℹ Messages will be replayed in a NEW session after client disconnects")
         
         return data  # Forward normally during active session
@@ -614,27 +613,27 @@ class MITMAttacker:
     def _execute_replay_attack_after_session(self, client_id: int):
         """Execute replay attack after the original session has ended"""
         if client_id not in self.saved_session_messages or len(self.saved_session_messages[client_id]) == 0:
-            print(f"\n❌ No saved messages for Client {client_id}")
+            print(f"\n No saved messages for Client {client_id}")
             return
         
         print(f"\n{'='*70}")
-        print(f"⚡ EXECUTING REPLAY ATTACK (Post-Session)")
+        print(f" EXECUTING REPLAY ATTACK (Post-Session)")
         print(f"Target: Client {client_id}")
         print(f"Strategy: Create NEW session and replay OLD messages")
         print(f"{'='*70}")
         
         messages_to_replay = self.saved_session_messages[client_id]
-        print(f"\n✓ Found {len(messages_to_replay)} captured messages from previous session")
-        print(f"✓ Creating NEW connection to server...")
+        print(f"\n Found {len(messages_to_replay)} captured messages from previous session")
+        print(f" Creating NEW connection to server...")
         
         try:
             # Create NEW connection to server
             replay_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             replay_socket.connect((self.server_host, self.server_port))
-            print(f"✓ Connected to server for replay attack")
+            print(f" Connected to server for replay attack")
             
             # Replay captured messages from old session
-            print(f"\n⚡ REPLAYING OLD MESSAGES IN NEW SESSION:")
+            print(f"\n REPLAYING OLD MESSAGES IN NEW SESSION:")
             for i, (msg_data, direction) in enumerate(messages_to_replay, 1):
                 if direction != "C→S":
                     continue  # Only replay client→server messages
@@ -664,29 +663,29 @@ class MITMAttacker:
                                 if len(response_data) >= 1:
                                     opcode = response_data[0]
                                     if opcode == 50:
-                                        print(f"  ✓ Replay blocked: Server detected attack (opcode {opcode})")
+                                        print(f"   Replay blocked: Server detected attack (opcode {opcode})")
                                     elif opcode in [60]:
-                                        print(f"  ✓ Replay blocked: Session terminated (opcode {opcode})")
+                                        print(f"   Replay blocked: Session terminated (opcode {opcode})")
                         else:
-                            print(f"  ✓ Replay blocked: Connection closed by server")
+                            print(f"   Replay blocked: Connection closed by server")
                             break
                     except socket.timeout:
-                        print(f"  ✓ Replay blocked: No response (likely HMAC verification failed)")
+                        print(f"   Replay blocked: No response (likely HMAC verification failed)")
                         break
                     
                 except Exception as e:
-                    print(f"  ✓ Replay blocked: {e}")
+                    print(f"   Replay blocked: {e}")
                     break
             
             replay_socket.close()
             print(f"\n{'='*70}")
-            print(f"✓ REPLAY ATTACK COMPLETED")
+            print(f" REPLAY ATTACK COMPLETED")
             print(f"Result: Old messages replayed in NEW session")
             print(f"Expected: Server detected via HMAC failure (different session keys)")
             print(f"{'='*70}")
             
         except Exception as e:
-            print(f"\n❌ Replay attack failed: {e}")
+            print(f"\n Replay attack failed: {e}")
     
     def _attack_reorder(self, data: bytes, client_id: int, direction: str) -> bytes:
         """Attack: Reorder messages (legacy - use _attack_reorder_with_send instead)"""
@@ -707,14 +706,14 @@ class MITMAttacker:
         msg_count = len(same_dir_msgs)
         
         print(f"\n{'='*70}")
-        print(f"⚡ REORDER ATTACK - Message {msg_count}/3")
+        print(f" REORDER ATTACK - Message {msg_count}/3")
         print(f"{'='*70}")
         
         # Step 1: Forward msg1 normally
         if msg_count == 1:
             print(f"Strategy: Reorder messages (msg1 → [hold msg2] → msg3 → msg2)")
             print(f"  → Step 1: Forwarding msg1 NORMALLY")
-            print(f"     Server expects Round 1, receives Round 1 ✓")
+            print(f"     Server expects Round 1, receives Round 1 ")
             self._send_message(server_socket, data)
             return "CONTINUE"
         
@@ -731,7 +730,7 @@ class MITMAttacker:
             msg2 = same_dir_msgs[1]  # Held message (second)
             msg3 = data  # Current message (third)
             
-            print(f"\n⚡ EXECUTING REORDER ATTACK:")
+            print(f"\n EXECUTING REORDER ATTACK:")
             print(f"  → Step 3a: Sending msg3 (Round 3) - but server expects Round 2!")
             print(f"     Server state: last_round=1, expects Round 2")
             print(f"     Sending: Round 3")
@@ -750,8 +749,8 @@ class MITMAttacker:
             except Exception as e:
                 print(f"     Cannot send msg2: {e}")
             
-            print(f"\n✓ Reorder attack complete!")
-            print(f"✓ Attack detection: Server received Round 3 when expecting Round 2")
+            print(f"\n Reorder attack complete!")
+            print(f" Attack detection: Server received Round 3 when expecting Round 2")
             print(f"{'='*70}")
             
             return "ATTACK_PERFORMED"
@@ -779,9 +778,8 @@ class MITMAttacker:
         fake_round = current_round + 10
         modified[2:6] = struct.pack('>I', fake_round)
         
-        print(f"  ✓ Modified round number: {current_round} → {fake_round}")
-        print(f"  ✓ This will cause key evolution desynchronization")
-        print(f"  ✓ HMAC will fail because header was modified")
+        print(f"   Modified round number: {current_round} → {fake_round}")
+        print(f"   This will cause key evolution desynchronization")
         
         return bytes(modified)
     

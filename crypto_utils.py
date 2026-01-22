@@ -667,7 +667,7 @@ if __name__ == "__main__":
     unpadded = pkcs7_unpad(padded)
     print(f"Unpadded: {unpadded}")
     assert data == unpadded, "Padding/unpadding failed!"
-    print("✓ PKCS#7 padding working\n")
+    print(" PKCS#7 padding working\n")
     
     # Test encryption/decryption
     plaintext = b"Hello, this is a secret message!"
@@ -678,14 +678,14 @@ if __name__ == "__main__":
     print(f"Ciphertext: {ciphertext.hex()[:32]}...")
     print(f"Decrypted: {decrypted}")
     assert plaintext == decrypted, "Decryption failed!"
-    print("✓ AES-128-CBC encryption/decryption working\n")
+    print(" AES-128-CBC encryption/decryption working\n")
     
     # Test HMAC
     mac_key = generate_key()
     data = b"Data to authenticate"
     mac = compute_hmac(mac_key, data)
     assert verify_hmac(mac_key, data, mac), "HMAC verification failed!"
-    print("✓ HMAC authentication working\n")
+    print(" HMAC authentication working\n")
     
     # Test key derivation (HKDF)
     master_secret = os.urandom(32)
@@ -693,7 +693,7 @@ if __name__ == "__main__":
     enc_key, mac_key = derive_keys(master_secret, salt)
     print(f"HKDF derived encryption key: {enc_key.hex()} ({len(enc_key)} bytes)")
     print(f"HKDF derived MAC key: {mac_key.hex()[:32]}... ({len(mac_key)} bytes)")
-    print("✓ HKDF key derivation working\n")
+    print(" HKDF key derivation working\n")
     
     # Test directional key derivation
     master_key = os.urandom(32)  # Shared master key Ki
@@ -703,7 +703,7 @@ if __name__ == "__main__":
     print(f"  C2S_Mac_0 = H(Ki || 'C2S-MAC'): {c2s_mac.hex()[:32]}... ({len(c2s_mac)} bytes)")
     print(f"  S2C_Enc_0 = H(Ki || 'S2C-ENC'): {s2c_enc.hex()} ({len(s2c_enc)} bytes)")
     print(f"  S2C_Mac_0 = H(Ki || 'S2C-MAC'): {s2c_mac.hex()[:32]}... ({len(s2c_mac)} bytes)")
-    print("✓ Directional key derivation working\n")
+    print(" Directional key derivation working\n")
     
     # Test SecureMessage with Encrypt-then-MAC and directional keys
     client_id = 42  # Example client ID (0-255)
@@ -723,7 +723,7 @@ if __name__ == "__main__":
     print(f"  3. Server decrypts with C2S keys: {decrypted_msg}")
     print(f"     Opcode: {opcode}, Round: {round_num}")
     assert message == decrypted_msg, "Secure message decryption failed!"
-    print("✓ SecureMessage with Encrypt-then-MAC and directional keys working\n")
+    print(" SecureMessage with Encrypt-then-MAC and directional keys working\n")
     
     # Test replay protection
     print("Testing replay protection:")
@@ -731,7 +731,7 @@ if __name__ == "__main__":
         server_receiver.parse_message(encrypted)  # Try to replay same message
         print("✗ Replay attack succeeded (BAD!)")
     except CryptoError as e:
-        print(f"✓ Replay attack blocked: {e}\n")
+        print(f" Replay attack blocked: {e}\n")
     
     # Test tampering detection
     print("Testing tampering detection:")
@@ -741,13 +741,13 @@ if __name__ == "__main__":
         server_receiver.parse_message(bytes(tampered))
         print("✗ Tampering not detected (BAD!)")
     except CryptoError as e:
-        print(f"✓ Tampering detected: {e}\n")
+        print(f" Tampering detected: {e}\n")
     
     # Test challenge-response
     challenge = create_challenge()
     shared_secret = os.urandom(32)
     response = create_response(challenge, shared_secret)
     assert verify_response(challenge, response, shared_secret), "Challenge-response failed!"
-    print("✓ Challenge-response authentication working\n")
+    print(" Challenge-response authentication working\n")
     
-    print("All cryptographic tests passed! ✓")
+    print("All cryptographic tests passed! ")

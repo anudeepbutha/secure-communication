@@ -348,10 +348,27 @@ class SecureServer:
             logger.info(f"[{client_address}] Connection closed" + (f" (Client {client_id})" if client_id else ""))
     
     def _data_transfer_phase(self, sock: socket.socket, session: ClientSession):
-        """Handle data transfer phase with attack detection"""
-        protocol = session.protocol
+        """
+        Handle data transfer phase with asynchronous response capability.
         
-        logger.info(f"[{session.client_address}] Entering DATA_TRANSFER phase")
+        The server listens continuously for incoming messages and delegates
+        response handling to worker threads, allowing full-duplex communication.
+        """
+        protocol = session.protocol
+        session_lock = threading.Lock()  # Per-session lock for thread-safe key evolution
+        
+        logger.info(f"[{session.client_address}] Entering DATA_TRANSFER phase (asynchronous mode)")
+        
+        def async_respond(data: bytes):
+            """Worker thread to process and send response without blocking listener."""
+            try:
+                response = self._handle_data_message(data, session)
+                with session_lock:
+                    encrypted_resp = protocol.create_data_message(response)
+                sock.sendall(struct.pack('>I', len(encrypted_resp)) + encrypted_resp)
+                logger.debug(f"[{session.client_address}] Async response sent")
+            except Exception as e:
+                logger.error(f"[{session.client_address}] Async respond error: {e}")
         
         while self.running:
             try:
@@ -368,11 +385,13 @@ class SecureServer:
                 if not encrypted:
                     break
                 
-                # Check for protocol messages vs data
-                # Try to parse as protocol message first
+                # Decrypt and verify immediately (thread-safe)
                 try:
-                    # Decrypt the message
-                    data = protocol.process_data_message(encrypted)
+                    with session_lock:
+                        # Decrypt and verify round/HMAC immediately
+                        # This detects replay, reordering, and tampering attacks
+                        data = protocol.process_data_message(encrypted)
+                    
                     session.message_count += 1
                     session.last_activity = datetime.now()
                     
@@ -382,12 +401,13 @@ class SecureServer:
                     if data == b"__CLOSE__":
                         logger.info(f"[{session.client_address}] Close requested")
                         # Send close acknowledgment
-                        self._send_encrypted(sock, protocol, b"__CLOSE_ACK__")
+                        with session_lock:
+                            close_resp = protocol.create_data_message(b"__CLOSE_ACK__")
+                        sock.sendall(struct.pack('>I', len(close_resp)) + close_resp)
                         break
                     
-                    # Process data and send response
-                    response = self._handle_data_message(data, session)
-                    self._send_encrypted(sock, protocol, response)
+                    # Delegate response to a worker thread so listener stays active
+                    threading.Thread(target=async_respond, args=(data,), daemon=True).start()
                     
                 except CryptoError as e:
                     # ATTACK DETECTED: Could be replay, modification, tampering, or reordering

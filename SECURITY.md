@@ -19,7 +19,7 @@
 
 ### 2. Security Properties
 
-#### 2.1 Confidentiality ✓
+#### 2.1 Confidentiality 
 
 **Mechanism**: AES-128-CBC Encryption
 
@@ -34,12 +34,12 @@
 - No IV reuse within same session
 
 **Attack Resistance**:
-- ❌ **Eavesdropping**: Ciphertext reveals no plaintext information
-- ❌ **Pattern Analysis**: Random IVs prevent identical plaintexts from producing identical ciphertexts
+-  **Eavesdropping**: Ciphertext reveals no plaintext information
+-  **Pattern Analysis**: Random IVs prevent identical plaintexts from producing identical ciphertexts
 
 ---
 
-#### 2.2 Integrity ✓
+#### 2.2 Integrity 
 
 **Mechanism**: HMAC-SHA256 (Encrypt-then-MAC)
 
@@ -65,12 +65,12 @@ HMAC = HMAC-SHA256(Mac_Key, Header || Ciphertext)
 - Prevents chosen-ciphertext attacks
 
 **Attack Resistance**:
-- ❌ **Tampering**: Any bit flip → HMAC verification fails → Session terminates
-- ❌ **Padding Oracle**: Decryption only occurs after HMAC verification
+-  **Tampering**: Any bit flip → HMAC verification fails → Session terminates
+-  **Padding Oracle**: Decryption only occurs after HMAC verification
 
 ---
 
-#### 2.3 Freshness (Replay Protection) ✓
+#### 2.3 Freshness (Replay Protection) 
 
 **Mechanism**: Round Number Tracking + Key Evolution
 
@@ -101,8 +101,8 @@ Old message from Round 1:
 ```
 
 **Attack Resistance**:
-- ❌ **Replay Attack**: Old messages have HMACs with old keys → HMAC fails
-- ❌ **Reflection Attack**: Direction bit prevents reflecting C→S as S→C
+-  **Replay Attack**: Old messages have HMACs with old keys → HMAC fails
+-  **Reflection Attack**: Direction bit prevents reflecting C→S as S→C
 
 **Demonstration**:
 ```
@@ -118,7 +118,7 @@ Session 2:
 
 ---
 
-#### 2.4 Ordering (Reorder Protection) ✓
+#### 2.4 Ordering (Reorder Protection) 
 
 **Mechanism**: Strict Round Number Sequencing
 
@@ -150,7 +150,7 @@ Reordering attack: Round 1 → [hold 2] → Round 3 → Round 2
 ```
 
 **Attack Resistance**:
-- ❌ **Message Reordering**: Round check + key evolution prevents out-of-order messages
+-  **Message Reordering**: Round check + key evolution prevents out-of-order messages
 
 **Demonstration**:
 ```
@@ -160,13 +160,13 @@ Attacker intercepts:
 Attacker reorders: msg1 → [hold msg2] → msg3 → msg2
 
 Server processing:
-  ✓ msg1 (Round 1): Expected 1, got 1 → Accept
+   msg1 (Round 1): Expected 1, got 1 → Accept
   ✗ msg3 (Round 3): Expected 2, got 3 → Reject OR HMAC fails
 ```
 
 ---
 
-#### 2.5 Key Desynchronization Prevention ✓
+#### 2.5 Key Desynchronization Prevention 
 
 **Mechanism**: Atomic Key Evolution
 
@@ -188,7 +188,7 @@ def parse_message(data):
 - Sender and receiver evolve keys in lockstep
 
 **Attack Resistance**:
-- ❌ **Desync Attack**: Modifying round number → HMAC fails before key evolution
+-  **Desync Attack**: Modifying round number → HMAC fails before key evolution
 
 **Demonstration**:
 ```
@@ -203,7 +203,7 @@ Attacker modifies Round 2 → Round 12:
 
 ### 3. Attack Demonstrations
 
-#### 3.1 Replay Attack ✓ BLOCKED
+#### 3.1 Replay Attack  BLOCKED
 
 **Attack Scenario**:
 ```
@@ -218,11 +218,11 @@ Attacker modifies Round 2 → Round 12:
 - Old messages encrypted with old session keys
 - HMAC verification fails
 
-**Test Result**: ✓ Session terminated, no data leakage
+**Test Result**:  Session terminated, no data leakage
 
 ---
 
-#### 3.2 Message Reordering ✓ BLOCKED
+#### 3.2 Message Reordering  BLOCKED
 
 **Attack Scenario**:
 ```
@@ -238,11 +238,11 @@ Attacker sends:
 - Keys evolved for Round 2, message uses Round 3 keys
 - HMAC verification fails OR round number check fails
 
-**Test Result**: ✓ Session terminated at msg3
+**Test Result**:  Session terminated at msg3
 
 ---
 
-#### 3.3 HMAC Tampering ✓ BLOCKED
+#### 3.3 HMAC Tampering  BLOCKED
 
 **Attack Scenario**:
 ```
@@ -254,11 +254,11 @@ Attacker flips 1 bit in ciphertext
 - Any modification → HMAC verification fails
 - Session terminated BEFORE decryption
 
-**Test Result**: ✓ Tampering detected, session terminated
+**Test Result**:  Tampering detected, session terminated
 
 ---
 
-#### 3.4 Key Desynchronization ✓ BLOCKED
+#### 3.4 Key Desynchronization  BLOCKED
 
 **Attack Scenario**:
 ```
@@ -270,7 +270,7 @@ Attacker modifies round number in header
 - HMAC covers header
 - Modifying round → HMAC fails
 
-**Test Result**: ✓ Modification detected, session terminated
+**Test Result**:  Modification detected, session terminated
 
 ---
 
@@ -324,10 +324,10 @@ Given K_R, can compute K_R+1, K_R+2, ... (forward computation)
 - Manual IV generation provides explicit control
 
 **Security Considerations**:
-- ✓ Random IV for each message prevents pattern analysis
-- ✓ No IV reuse within session
-- ⚠️ Padding oracle attacks mitigated by Encrypt-then-MAC
-- ⚠️ CBC mode requires careful padding (PKCS#7 manually implemented)
+-  Random IV for each message prevents pattern analysis
+-  No IV reuse within session
+-  Padding oracle attacks mitigated by Encrypt-then-MAC
+-  CBC mode requires careful padding (PKCS#7 manually implemented)
 
 #### 5.2 HMAC-SHA256
 
@@ -337,9 +337,9 @@ Given K_R, can compute K_R+1, K_R+2, ... (forward computation)
 - Standardized in RFC 2104
 
 **Security Considerations**:
-- ✓ Separate MAC keys for each direction
-- ✓ MAC covers entire message (header + ciphertext)
-- ✓ Constant-time comparison prevents timing attacks
+-  Separate MAC keys for each direction
+-  MAC covers entire message (header + ciphertext)
+-  Constant-time comparison prevents timing attacks
 
 #### 5.3 PKCS#7 Padding
 
@@ -360,9 +360,9 @@ def pkcs7_unpad(padded_data, block_size=16):
 ```
 
 **Security Considerations**:
-- ✓ Padding always applied (even if data is block-aligned)
-- ✓ Validation prevents padding oracle attacks
-- ✓ Padding errors treated as authentication failures
+-  Padding always applied (even if data is block-aligned)
+-  Validation prevents padding oracle attacks
+-  Padding errors treated as authentication failures
 
 ---
 
@@ -390,8 +390,8 @@ if new_state not in valid_transitions[current_state]:
 ```
 
 **Attack Resistance**:
-- ❌ **Protocol Confusion**: Out-of-order opcodes rejected
-- ❌ **State Desync**: Both parties must be in compatible states
+-  **Protocol Confusion**: Out-of-order opcodes rejected
+-  **State Desync**: Both parties must be in compatible states
 
 ---
 
@@ -419,9 +419,9 @@ Compromising Client 1's keys does NOT affect Client 2's security
 - No client can decrypt another client's communications
 
 **Privacy Consideration**:
-- ⚠️ Aggregate value reveals sum, not individual contributions
-- ⚠️ With 2 clients, Client 2 can infer Client 1's value
-- ✓ With many clients, individual privacy improved
+-  Aggregate value reveals sum, not individual contributions
+-  With 2 clients, Client 2 can infer Client 1's value
+-  With many clients, individual privacy improved
 
 ---
 
@@ -441,8 +441,8 @@ except CryptoError:
 ```
 
 **Attack Resistance**:
-- ✓ No information leakage through error messages
-- ✓ Consistent error handling for all attacks
+-  No information leakage through error messages
+-  Consistent error handling for all attacks
 
 #### 8.2 Constant-Time Operations
 
