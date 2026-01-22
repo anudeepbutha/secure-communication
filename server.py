@@ -84,6 +84,12 @@ class SecureServer:
         self.data_handler: Optional[Callable[[bytes, ClientSession], bytes]] = None
         self._lock = threading.Lock()
         
+        # Per-round aggregation state
+        self.round_aggregates: Dict[int, float] = {}  # round_number -> sum
+        self.round_contributions: Dict[int, Dict[int, float]] = {}  # round_number -> {client_id -> value}
+        self.round_client_count: Dict[int, int] = {}  # round_number -> count of clients
+        self.aggregation_lock = threading.Lock()
+        
         # Register default message handler
         self._setup_default_handlers()
     
@@ -115,7 +121,6 @@ class SecureServer:
         self.running = True
         
         logger.info(f"Server started on {self.host}:{self.port}")
-        logger.info("Pre-shared keys for clients:")
 
         while self.running:
             try:
@@ -400,34 +405,56 @@ class SecureServer:
             ]
 
 
-def create_echo_handler():
-    """Create an echo handler that returns the received data"""
-    def handler(data: bytes, session: ClientSession) -> bytes:
-        logger.info(f"Echo handler: {data.decode('utf-8', errors='replace')}")
-        return b"Echo: " + data
-    return handler
-
-
-def create_command_handler():
-    """Create a command handler that processes commands"""
+def create_aggregation_handler(server: SecureServer):
+    """
+    Create an aggregation handler with PER-ROUND aggregation.
+    
+    Maintains separate aggregates for each round number across all clients.
+    Round 1 from all clients aggregates together, Round 2 from all clients aggregates together, etc.
+    """
     def handler(data: bytes, session: ClientSession) -> bytes:
         try:
-            command = data.decode('utf-8').strip()
+            message = data.decode('utf-8').strip()
+            client_id = session.protocol.client_id
+            round_number = session.protocol.secure_message.round_number
             
-            if command == "TIME":
-                return f"Server time: {datetime.now().isoformat()}".encode()
-            elif command == "SESSION":
-                return f"Session ID: {session.session_id.hex()}".encode()
-            elif command == "COUNT":
-                return f"Messages: {session.message_count}".encode()
-            elif command == "PING":
-                return b"PONG"
-            elif command.startswith("ECHO "):
-                return command[5:].encode()
-            else:
-                return f"Unknown command: {command}".encode()
+            # Try to parse as numeric value
+            try:
+                value = float(message)
+                
+                with server.aggregation_lock:
+                    # Initialize round if not exists
+                    if round_number not in server.round_aggregates:
+                        server.round_aggregates[round_number] = 0.0
+                        server.round_contributions[round_number] = {}
+                        server.round_client_count[round_number] = 0
+                    
+                    # Add to round aggregate
+                    server.round_aggregates[round_number] += value
+                    server.round_contributions[round_number][client_id] = value
+                    server.round_client_count[round_number] = len(server.round_contributions[round_number])
+                    
+                    current_round_total = server.round_aggregates[round_number]
+                    client_count = server.round_client_count[round_number]
+                    
+                    # Create breakdown string
+                    contributions = server.round_contributions[round_number]
+                    breakdown = ", ".join([f"C{cid}={val}" for cid, val in sorted(contributions.items())])
+                
+                logger.info(f"[Client {client_id}, Round {round_number}] Value: {value}, " +
+                           f"Round Aggregate: {current_round_total} (from {client_count} clients)")
+                logger.info(f"  Round {round_number} breakdown: {breakdown}")
+                
+                response = f"Round {round_number} Aggregate: {current_round_total:.2f} ({client_count} clients)".encode()
+                return response
+                
+            except ValueError:
+                # Not a number - return error
+                return f"Invalid input. Please send numeric values only.".encode()
+                
         except Exception as e:
-            return f"Error processing command: {e}".encode()
+            logger.error(f"Aggregation handler error: {e}")
+            return f"Error: {e}".encode()
     
     return handler
 
@@ -439,8 +466,6 @@ def main():
     parser = argparse.ArgumentParser(description='Secure Communication Server')
     parser.add_argument('--host', default='localhost', help='Host address')
     parser.add_argument('--port', type=int, default=9999, help='Port number')
-    parser.add_argument('--mode', choices=['echo', 'command'], default='echo',
-                        help='Server mode: echo or command')
     args = parser.parse_args()
     
     # Create server with hardcoded keys for 5 clients
@@ -449,14 +474,8 @@ def main():
         port=args.port
     )
     
-    # Set handler based on mode
-    if args.mode == 'echo':
-        server.set_data_handler(create_echo_handler())
-        print("Server running in ECHO mode")
-    else:
-        server.set_data_handler(create_command_handler())
-        print("Server running in COMMAND mode")
-        print("Available commands: TIME, SESSION, COUNT, PING, ECHO <message>")
+    # Set aggregation handler (default mode)
+    server.set_data_handler(create_aggregation_handler(server))
     
     try:
         server.start()

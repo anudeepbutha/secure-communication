@@ -322,7 +322,7 @@ class InteractiveClient:
         
         print("\n=== Secure Communication Session ===")
         print(f"Session ID: {self.client.get_session_id()[:16]}...")
-        print("Type 'help' for commands, 'quit' to exit\n")
+        print("Type 'quit' to exit\n")
         
         while True:
             try:
@@ -335,15 +335,7 @@ class InteractiveClient:
                     print("Closing connection...")
                     break
                 
-                if user_input.lower() == 'help':
-                    self._print_help()
-                    continue
-                
-                if user_input.lower() == 'status':
-                    self._print_status()
-                    continue
-                
-                # Send message to server
+                # Send message to server (numeric value)
                 response = self.client.send_message(user_input)
                 if response:
                     print(f"Server: {response}")
@@ -363,24 +355,6 @@ class InteractiveClient:
                 break
         
         self.client.disconnect()
-    
-    def _print_help(self):
-        """Print help message"""
-        print("""
-Available commands:
-  help     - Show this help message
-  status   - Show connection status
-  quit     - Close connection and exit
-  
-Server commands (if running in command mode):
-  TIME     - Get server time
-  SESSION  - Get session ID
-  COUNT    - Get message count
-  PING     - Ping server
-  ECHO <msg> - Echo a message
-  
-Any other input will be sent to the server.
-        """)
     
     def _print_status(self):
         """Print connection status"""
