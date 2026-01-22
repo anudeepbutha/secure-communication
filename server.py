@@ -319,6 +319,31 @@ class SecureServer:
                     del self.sessions[session.session_id]
                     if client_id and client_id in self.client_sessions:
                         del self.client_sessions[client_id]
+                
+                # Clear client's contributions from all rounds
+                if client_id is not None:
+                    with self.aggregation_lock:
+                        for round_number in list(self.round_contributions.keys()):
+                            if client_id in self.round_contributions[round_number]:
+                                # Subtract client's contribution from round aggregate
+                                value = self.round_contributions[round_number][client_id]
+                                self.round_aggregates[round_number] -= value
+                                
+                                # Remove client from round contributions
+                                del self.round_contributions[round_number][client_id]
+                                
+                                # Update client count
+                                self.round_client_count[round_number] = len(self.round_contributions[round_number])
+                                
+                                logger.info(f"[Client {client_id}] Cleared contribution of {value} from Round {round_number}")
+                                
+                                # Remove empty rounds
+                                if self.round_client_count[round_number] == 0:
+                                    del self.round_aggregates[round_number]
+                                    del self.round_contributions[round_number]
+                                    del self.round_client_count[round_number]
+                                    logger.info(f"[Round {round_number}] Cleared (no more clients)")
+            
             client_socket.close()
             logger.info(f"[{client_address}] Connection closed" + (f" (Client {client_id})" if client_id else ""))
     
